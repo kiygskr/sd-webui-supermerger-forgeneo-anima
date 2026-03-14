@@ -2,7 +2,7 @@ import os
 import torch
 import safetensors.torch
 import threading
-from modules import shared, sd_hijack, sd_models
+from modules import shared, sd_models
 import json
 
 try:
@@ -10,6 +10,12 @@ try:
   xl = True
 except:
   xl = False
+
+try:
+  from modules import sd_hijack
+except (ImportError, ModuleNotFoundError):
+  sd_hijack = None
+  
 
 def prune_model(model, isxl=False):
     keys = list(model.keys())
