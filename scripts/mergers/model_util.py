@@ -15,6 +15,19 @@ try:
   from modules import sd_hijack
 except (ImportError, ModuleNotFoundError):
   sd_hijack = None
+
+def get_checkpoint_output_dir():
+    ckpt_dir = getattr(shared.cmd_opts, "ckpt_dir", None)
+    if ckpt_dir:
+        return ckpt_dir
+
+    ckpt_dirs = getattr(shared.cmd_opts, "ckpt_dirs", None)
+    if ckpt_dirs:
+        for path in ckpt_dirs:
+            if path:
+                return path
+
+    return sd_models.model_path
   
 
 def prune_model(model, isxl=False):
@@ -102,7 +115,7 @@ def savemodel(state_dict,currentmodel,fname,savesets,metadata={}):
     else:
         fname = fname if ext in fname else fname +pre+ext
 
-    fname = os.path.join(shared.cmd_opts.ckpt_dir if shared.cmd_opts.ckpt_dir is not None else sd_models.model_path, fname)
+    fname = os.path.join(get_checkpoint_output_dir(), fname)
     fname = fname.replace("ProgramFiles_x86_","Program Files (x86)")
 
     if len(fname) > 255:
@@ -148,8 +161,8 @@ def savemodel(state_dict,currentmodel,fname,savesets,metadata={}):
         for key in other_dict.keys():
             state_dict[key] = other_dict[key]
         del other_dict
-        from modules.sd_models import load_model
-        load_model(checkpoint_info, already_loaded_state_dict=state_dict)
+        if hasattr(sd_models, "load_model"):
+            sd_models.load_model(checkpoint_info, already_loaded_state_dict=state_dict)
     return "Merged model saved in "+fname
 
 def filenamecutter(name,model_a = False):

@@ -135,9 +135,12 @@ def smergegen(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,m
 
     save = True if SAVEMODES[0] in save_sets else False
 
-    result = savemodel(theta_0,currentmodel,custom_name,save_sets,metadata) if save else "Merged model loaded:"+currentmodel
-
-    model_loader(checkpoint_info, theta_0, metadata, currentmodel)
+    if save and (forge or neo):
+        model_loader(checkpoint_info, theta_0, metadata, currentmodel)
+        result = forge_save(custom_name if custom_name else currentmodel)
+    else:
+        result = savemodel(theta_0,currentmodel,custom_name,save_sets,metadata) if save else "Merged model loaded:"+currentmodel
+        model_loader(checkpoint_info, theta_0, metadata, currentmodel)
 
     cachedealer(False)
 
@@ -164,6 +167,28 @@ def smergegen(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,m
 
 def checkpointer_infomer(name):
     return sd_models.get_closet_checkpoint_match(name)
+
+def normalize_anima_merge_state_dict(state_dict):
+    if any(k.startswith("model.diffusion_model.") for k in state_dict.keys()):
+        return state_dict
+
+    remapped = {}
+    changed = False
+    for key, value in state_dict.items():
+        if key.startswith("net."):
+            remapped["model.diffusion_model." + key[len("net."):]] = value
+            changed = True
+        elif key.startswith("blocks.") or key.startswith("patch_embed.") or key.startswith("final_layer.") or key.startswith("t_embedder."):
+            remapped["model.diffusion_model." + key] = value
+            changed = True
+        else:
+            remapped[key] = value
+
+    if changed:
+        print('Normalized Anima state dict keys to "model.diffusion_model." prefix.')
+        return remapped
+
+    return state_dict
 
 # XXX hack. fake checkpoint_info
 def fake_checkpoint_info(checkpoint_info,metadata={},currentmodel=""):
@@ -451,7 +476,7 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
         else:
             continue
         
-        weight_index_xl = BLOCKIDXLLL.index(block)
+        weight_index_xl = BLOCKIDXLLL.index(block) if block in BLOCKIDXLLL else -1
 
         if useblocks:
             if weight_index > 0:
@@ -913,8 +938,9 @@ def multithread_smoothadd(key_and_alpha, theta_0, theta_1, threads, tasks_per_th
             caster(f"model A[{key}] +  {key_and_alpha[key]} + * (model B - model C)[{key}]", hear)
             filtered_diff = scipy.ndimage.median_filter(theta_1[key].to(torch.float32).cpu().numpy(), size=3)
             filtered_diff = scipy.ndimage.gaussian_filter(filtered_diff, sigma=1)
+            filtered_tensor = torch.tensor(filtered_diff, device=theta_0[key].device, dtype=theta_0[key].dtype)
             with lock_theta_1:
-                theta_1[key] = torch.tensor(filtered_diff)
+                theta_1[key] = filtered_tensor
             with lock_theta_0:
                 theta_0[key] = theta_0[key] + key_and_alpha[key] * theta_1[key]
 
@@ -993,6 +1019,7 @@ def load_model_weights_m(model,abc,cachetarget,device):
     else:
         print(f"Loading weights [{sd_model_name}] from file")
         state_dict = forkforker(checkpoint_info.filename,device)
+        state_dict = normalize_anima_merge_state_dict(state_dict)
         if orig_cache >= abc:
             modelcache[checkpoint_info] = state_dict
             modelcache[checkpoint_info] = {k: v.to("cpu") for k, v in modelcache[checkpoint_info].items()}
@@ -1707,11 +1734,24 @@ def model_loader(checkpoint_info, state_dict,metadata, currentmodel):
 
     if neo:
         sd_models.model_data.__init__()
+        if hasattr(sd_models.model_data, "forge_loading_parameters"):
+            sd_models.model_data.forge_loading_parameters = dict(
+                checkpoint_info=checkpoint_info,
+                additional_modules=shared.opts.forge_additional_modules,
+                unet_storage_dtype=fsd.dynamic_args.get('forge_unet_storage_dtype', None) if 'fsd' in globals() else None,
+            )
         load_forge_model(state_dict,checkpoint_info)
     elif not forge:
         sd_models.model_data.__init__()
         sd_models.load_model(checkpoint_info, already_loaded_state_dict=state_dict)
     else:
+        from modules_forge.main_entry import forge_unet_storage_dtype_options
+        unet_storage_dtype, _ = forge_unet_storage_dtype_options.get(shared.opts.forge_unet_storage_dtype, (None, False))
+        fsd.model_data.forge_loading_parameters = dict(
+            checkpoint_info=checkpoint_info,
+            additional_modules=shared.opts.forge_additional_modules,
+            unet_storage_dtype=unet_storage_dtype,
+        )
         memory_management.free_memory(1e30,torch.device("cpu"))
         load_forge_model(state_dict,checkpoint_info)
     print("SuperMerger: Merged Model Loaded.")
@@ -1803,16 +1843,16 @@ def forge_loader(state_dict, additional_state_dicts):
     
     repo_name = estimated_config.huggingface_repo
 
-    local_path = os.path.join(fld.dir_path, 'huggingface', repo_name)
-    config: dict = fld.DiffusionPipeline.load_config(local_path)
+    from diffusers import DiffusionPipeline
+
+    local_path = os.path.join(fld.HF, repo_name)
+    config: dict = DiffusionPipeline.load_config(local_path)
     huggingface_components = {}
     for component_name, v in config.items():
         if isinstance(v, list) and len(v) == 2:
             lib_name, cls_name = v
-            component_sd = state_dicts.get(component_name, None)
+            component_sd = state_dicts.pop(component_name, None)
             component = fld.load_huggingface_component(estimated_config, component_name, lib_name, cls_name, local_path, component_sd)
-            if component_sd is not None:
-                del state_dicts[component_name]
             if component is not None:
                 huggingface_components[component_name] = component
 
@@ -1828,9 +1868,9 @@ def split_state_dict(sd, additional_state_dicts: list = None):
     guess = huggingface_guess.guess(sd)
 
     if isinstance(additional_state_dicts, list):
-        for asd in additional_state_dicts:
-            asd = load_torch_file(asd)
-            sd = fld.replace_state_dict(sd, asd, guess)
+        for asd_path in additional_state_dicts:
+            asd = load_torch_file(asd_path)
+            sd = fld.replace_state_dict(sd, asd, guess, asd_path)
 
     guess.clip_target = guess.clip_target(sd)
 
@@ -1906,6 +1946,11 @@ def to_qdtype(sd_1, sd_2, qd_1, qd_2, device, m1, m2):
     if qd_2 in QTYPES: 
         print(f"Changing dtype of {m2} to {qd_1 if t2 is None else t2}")
         q_dequantize(sd_2,qd_2,device,qd_1)
+    elif qd_1 != qd_2 and qd_1 is not None:
+        print(f"Changing dtype of {m2} to {qd_1}")
+        for key in sd_2:
+            if isinstance(sd_2[key], torch.Tensor):
+                sd_2[key] = sd_2[key].to(qd_1)
 
     devices.torch_gc()
     

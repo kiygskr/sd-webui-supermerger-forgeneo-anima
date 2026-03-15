@@ -24,7 +24,7 @@ from scripts.mergers.model_util import filenamecutter, savemodel
 from scripts.mergers.mergers import extract_super, unload_forge, q_dequantize, q_quantize, qdtyper, prefixer, BLOCKIDFLUX
 from tqdm import tqdm
 
-forge = launch_utils.git_tag()[0:2] == "f2"
+forge = hasattr(sd_models, "forge_model_reload") or launch_utils.git_tag()[0:2] == "f2"
 
 selectable = []
 pchanged = False
@@ -38,6 +38,29 @@ BLOCKID12=["BASE","IN04","IN05","IN07","IN08","M00","OUT00","OUT01","OUT02","OUT
 BLOCKID20=["BASE","IN00","IN01","IN02","IN03","IN04","IN05","IN06","IN07","IN08","M00","OUT00","OUT01","OUT02","OUT03","OUT04","OUT05","OUT06","OUT07","OUT08"]
 BLOCKNUMS = [12,17,20,26,61]
 BLOCKIDS=[BLOCKID12,BLOCKID17,BLOCKID20,BLOCKID26]
+ANIMA_KEY_MARKERS = (
+    "lora_unet_blocks_",
+    "lora_unet_patch_embed",
+    "lora_unet_final_layer",
+    "lora_unet_t_embedder",
+    "lora_te_text_encoders_",
+    "lora_te_llm_adapter_",
+)
+ANIMA_QWEN_PREFIXES = (
+    "text_encoders_qwen25_7b_",
+    "text_encoders_qwen3_06b_transformer_",
+    "text_encoders_qwen3_transformer_",
+)
+ANIMA_QWEN_ALIAS_TO_DOT = {
+    "text_encoders_qwen25_7b_": "text_encoders.qwen25_7b.",
+    "text_encoders_qwen3_06b_transformer_": "text_encoders.qwen3_06b.transformer.",
+    "text_encoders_qwen3_transformer_": "text_encoders.qwen3.transformer.",
+}
+ANIMA_QWEN_MODEL_LAYER_PREFIXES = (
+    ("text_encoders_qwen25_7b_model_layers_", "text_encoders.qwen25_7b.model.layers."),
+    ("text_encoders_qwen3_06b_transformer_model_layers_", "text_encoders.qwen3_06b.transformer.model.layers."),
+    ("text_encoders_qwen3_transformer_model_layers_", "text_encoders.qwen3.transformer.model.layers."),
+)
 
 def to26(ratios):
     if len(ratios) == 26 or len(ratios) > 40 : return ratios
@@ -55,6 +78,277 @@ def to61s(ratioss):
         else:
             out.append(ratios + [ratios[0]] * (61 - len(ratios)))
     return out
+
+def is_anima_lora_key(key):
+    return any(marker in key for marker in ANIMA_KEY_MARKERS)
+
+def is_anima_checkpoint_key(key):
+    return (
+        key.startswith("model.diffusion_model.blocks.")
+        or key.startswith("model.diffusion_model.patch_embed.")
+        or key.startswith("model.diffusion_model.final_layer.")
+        or key.startswith("model.diffusion_model.t_embedder.")
+        or key.startswith("net.blocks.")
+        or key.startswith("net.patch_embed.")
+        or key.startswith("net.final_layer.")
+        or key.startswith("net.t_embedder.")
+        or key.startswith("net.llm_adapter.")
+        or key.startswith("text_encoders.")
+        or key.startswith("llm_adapter.")
+        or ".model.layers." in key
+        or "_model_layers_" in key
+        or key.startswith("model.layers.")
+        or key.startswith("model_layers_")
+    )
+
+def register_key_alias(keychanger, alias, original_key):
+    if alias and alias not in keychanger:
+        keychanger[alias] = original_key
+
+def suffix_after_prefix(value, prefix):
+    if value.startswith(prefix):
+        return value[len(prefix):]
+    return None
+
+def strip_tensor_suffix(key):
+    for suffix in (".weight", ".bias", ".alpha", "_weight", "_bias", "_alpha"):
+        if key.endswith(suffix):
+            return key[:-len(suffix)]
+    return key
+
+def _anima_join_tokens(tokens):
+    parts = []
+    i = 0
+    while i < len(tokens):
+        if i + 3 < len(tokens) and tokens[i] == "adaln" and tokens[i + 1] == "modulation" and tokens[i + 2] in {"cross", "self"} and tokens[i + 3] == "attn":
+            parts.append(f"adaln_modulation_{tokens[i + 2]}_attn")
+            i += 4
+            continue
+        if i + 2 < len(tokens) and tokens[i] == "adaln" and tokens[i + 1] == "modulation":
+            parts.append(f"adaln_modulation_{tokens[i + 2]}")
+            i += 3
+            continue
+        if i + 1 < len(tokens) and tokens[i] in {"cross", "self"} and tokens[i + 1] == "attn":
+            parts.append(f"{tokens[i]}_attn")
+            i += 2
+            continue
+        if i + 1 < len(tokens) and tokens[i] in {"q", "k"} and tokens[i + 1] == "norm":
+            parts.append(f"{tokens[i]}_norm")
+            i += 2
+            continue
+        if i + 1 < len(tokens) and tokens[i] in {"q", "k", "v", "output"} and tokens[i + 1] == "proj":
+            parts.append(f"{tokens[i]}_proj")
+            i += 2
+            continue
+        parts.append(tokens[i])
+        i += 1
+    return parts
+
+def anima_dot_name_from_alias(alias):
+    prefixes = ("model_diffusion_model_", "diffusion_model_", "net_")
+    for prefix in prefixes:
+        if alias.startswith(prefix):
+            suffix = alias[len(prefix):]
+            tokens = _anima_join_tokens(suffix.split("_"))
+            return prefix.rstrip("_") + "." + ".".join(tokens)
+    if alias.startswith("llm_adapter_"):
+        suffix = alias[len("llm_adapter_"):]
+        tokens = _anima_join_tokens(suffix.split("_"))
+        return "llm_adapter." + ".".join(tokens)
+    if alias.startswith("text_encoders_"):
+        suffix = alias[len("text_encoders_"):]
+        tokens = _anima_join_tokens(suffix.split("_"))
+        return "text_encoders." + ".".join(tokens)
+    for prefix, dot_prefix in ANIMA_QWEN_ALIAS_TO_DOT.items():
+        if alias.startswith(prefix):
+            suffix = alias[len(prefix):]
+            tokens = _anima_join_tokens(suffix.split("_"))
+            return dot_prefix + ".".join(tokens)
+    if alias.startswith("model_layers_"):
+        suffix = alias[len("model_layers_"):]
+        tokens = _anima_join_tokens(suffix.split("_"))
+        return "model.layers." + ".".join(tokens)
+    return None
+
+def anima_key_aliases_from_checkpoint_key(key):
+    aliases = set()
+    base_key = strip_tensor_suffix(key)
+    normalized = base_key.replace(".", "_")
+    aliases.add(base_key)
+    aliases.add(normalized)
+
+    if normalized.startswith("model_diffusion_model_"):
+        suffix = normalized.split("model_diffusion_model_", 1)[1]
+        aliases.add(suffix)
+        aliases.add(f"diffusion_model_{suffix}")
+        aliases.add(f"net_{suffix}")
+        model_dot = anima_dot_name_from_alias(normalized)
+        if model_dot:
+            aliases.add(model_dot)
+            model_suffix = suffix_after_prefix(model_dot, "model.diffusion_model.")
+            if model_suffix:
+                aliases.add(model_suffix)
+        suffix_dot = anima_dot_name_from_alias(f"diffusion_model_{suffix}")
+        if suffix_dot:
+            aliases.add(suffix_dot)
+        net_dot = anima_dot_name_from_alias(f"net_{suffix}")
+        if net_dot:
+            aliases.add(net_dot)
+
+    if normalized.startswith("net_"):
+        suffix = normalized.split("net_", 1)[1]
+        aliases.add(suffix)
+        aliases.add(f"diffusion_model_{suffix}")
+        aliases.add(f"model_diffusion_model_{suffix}")
+        net_dot = anima_dot_name_from_alias(normalized)
+        if net_dot:
+            aliases.add(net_dot)
+            net_suffix = suffix_after_prefix(net_dot, "net.")
+            if net_suffix:
+                aliases.add(net_suffix)
+        suffix_dot = anima_dot_name_from_alias(f"diffusion_model_{suffix}")
+        if suffix_dot:
+            aliases.add(suffix_dot)
+        model_dot = anima_dot_name_from_alias(f"model_diffusion_model_{suffix}")
+        if model_dot:
+            aliases.add(model_dot)
+
+    if normalized.startswith("text_encoders_"):
+        aliases.add(normalized)
+        aliases.add(normalized.split("text_encoders_", 1)[1])
+        text_dot = anima_dot_name_from_alias(normalized)
+        if text_dot:
+            aliases.add(text_dot)
+            text_suffix = suffix_after_prefix(text_dot, "text_encoders.")
+            if text_suffix:
+                aliases.add(text_suffix)
+        for prefix in ANIMA_QWEN_PREFIXES:
+            if normalized.startswith(prefix):
+                aliases.add(normalized.split(prefix, 1)[1])
+                aliases.add(normalized.replace(prefix, ""))
+                qwen_dot = anima_dot_name_from_alias(normalized)
+                if qwen_dot:
+                    aliases.add(qwen_dot)
+                    qwen_suffix = suffix_after_prefix(qwen_dot, "text_encoders.")
+                    if qwen_suffix:
+                        aliases.add(qwen_suffix)
+                    if ".model.layers." in qwen_dot:
+                        aliases.add("model.layers." + qwen_dot.split(".model.layers.", 1)[1])
+                        aliases.add("layers." + qwen_dot.split(".model.layers.", 1)[1])
+
+    if normalized.startswith("llm_adapter_"):
+        aliases.add(normalized)
+        llm_dot = anima_dot_name_from_alias(normalized)
+        if llm_dot:
+            aliases.add(llm_dot)
+
+    if normalized.startswith("model_layers_") or "_model_layers_" in normalized:
+        if normalized.startswith("model_layers_"):
+            model_layers_name = normalized
+        else:
+            model_layers_name = "model_layers_" + normalized.split("_model_layers_", 1)[1]
+        aliases.add(model_layers_name)
+        aliases.add(model_layers_name.split("model_", 1)[1])
+        aliases.add(f"layers_{model_layers_name.split('model_layers_', 1)[1]}")
+        model_dot = anima_dot_name_from_alias(model_layers_name)
+        if model_dot:
+            aliases.add(model_dot)
+            model_layers_suffix = suffix_after_prefix(model_dot, "model.layers.")
+            if model_layers_suffix:
+                aliases.add(model_layers_suffix)
+
+    return aliases
+
+def module_key_from_fullkey(fullkey):
+    return strip_tensor_suffix(fullkey)
+
+def candidate_checkpoint_module_keys(msd_key):
+    candidates = []
+
+    def add(value):
+        if value and value not in candidates:
+            candidates.append(value)
+
+    base = strip_tensor_suffix(msd_key)
+    add(base)
+
+    if "." in base:
+        add(base.replace(".", "_"))
+    if "_" in base:
+        dot_name = anima_dot_name_from_alias(base)
+        if dot_name:
+            add(dot_name)
+
+    if base.startswith("diffusion_model_"):
+        suffix = base[len("diffusion_model_"):]
+        add(f"model_diffusion_model_{suffix}")
+        add(f"net_{suffix}")
+        add(f"diffusion_model.{'.'.join(_anima_join_tokens(suffix.split('_')))}")
+        add(f"model.diffusion_model.{'.'.join(_anima_join_tokens(suffix.split('_')))}")
+        add(f"net.{'.'.join(_anima_join_tokens(suffix.split('_')))}")
+    elif base.startswith("diffusion_model."):
+        suffix = base[len("diffusion_model."):]
+        add(f"model.diffusion_model.{suffix}")
+        add(f"net.{suffix}")
+    elif base.startswith("model_diffusion_model_"):
+        suffix = base[len("model_diffusion_model_"):]
+        add(f"diffusion_model_{suffix}")
+        add(f"net_{suffix}")
+    elif base.startswith("model.diffusion_model."):
+        suffix = base[len("model.diffusion_model."):]
+        add(f"diffusion_model.{suffix}")
+        add(f"net.{suffix}")
+    elif base.startswith("net_"):
+        suffix = base[len("net_"):]
+        add(f"diffusion_model_{suffix}")
+        add(f"model_diffusion_model_{suffix}")
+        add(f"diffusion_model.{'.'.join(_anima_join_tokens(suffix.split('_')))}")
+        add(f"model.diffusion_model.{'.'.join(_anima_join_tokens(suffix.split('_')))}")
+    elif base.startswith("net."):
+        suffix = base[len("net."):]
+        add(f"diffusion_model.{suffix}")
+        add(f"model.diffusion_model.{suffix}")
+    elif base.startswith("layers_"):
+        suffix = base[len("layers_"):]
+        add(f"model_layers_{suffix}")
+        add(f"model.layers.{'.'.join(_anima_join_tokens(suffix.split('_')))}")
+        suffix_dot = ".".join(_anima_join_tokens(suffix.split('_')))
+        for underscored_prefix, dotted_prefix in ANIMA_QWEN_MODEL_LAYER_PREFIXES:
+            add(f"{underscored_prefix}{suffix}")
+            add(f"{dotted_prefix}{suffix_dot}")
+    elif base.startswith("model_layers_"):
+        suffix = base[len("model_layers_"):]
+        add(f"layers_{suffix}")
+        add(f"model.layers.{'.'.join(_anima_join_tokens(suffix.split('_')))}")
+        suffix_dot = ".".join(_anima_join_tokens(suffix.split('_')))
+        for underscored_prefix, dotted_prefix in ANIMA_QWEN_MODEL_LAYER_PREFIXES:
+            add(f"{underscored_prefix}{suffix}")
+            add(f"{dotted_prefix}{suffix_dot}")
+    elif base.startswith("model.layers."):
+        suffix = base[len("model.layers."):]
+        add(f"model_layers_{suffix.replace('.', '_')}")
+        add(f"layers_{suffix.replace('.', '_')}")
+        suffix_us = suffix.replace('.', '_')
+        for underscored_prefix, dotted_prefix in ANIMA_QWEN_MODEL_LAYER_PREFIXES:
+            add(f"{underscored_prefix}{suffix_us}")
+            add(f"{dotted_prefix}{suffix}")
+    elif any(base.startswith(underscored_prefix) for underscored_prefix, _ in ANIMA_QWEN_MODEL_LAYER_PREFIXES):
+        suffix = base.split("_model_layers_", 1)[1]
+        add(f"model_layers_{suffix}")
+        add(f"layers_{suffix}")
+        add(f"model.layers.{'.'.join(_anima_join_tokens(suffix.split('_')))}")
+    elif any(base.startswith(dotted_prefix) for _, dotted_prefix in ANIMA_QWEN_MODEL_LAYER_PREFIXES):
+        suffix = base.split(".model.layers.", 1)[1]
+        add(f"model_layers_{suffix.replace('.', '_')}")
+        add(f"layers_{suffix.replace('.', '_')}")
+        add(f"model.layers.{suffix}")
+    return candidates
+
+def resolve_checkpoint_weight_key(msd_key, keychanger):
+    for candidate in candidate_checkpoint_module_keys(msd_key):
+        if candidate in keychanger:
+            return keychanger[candidate], candidate
+    return None, msd_key
 
 def f_changediffusers(version):
     launch.run_pip(f"install diffusers=={version}", f"diffusers ver {version}")
@@ -129,6 +423,7 @@ def on_ui_tabs():
         sml_dims = gr.CheckboxGroup(label = "1.X/2.X",choices=[],value = [],type="value",interactive=True,visible = False)
         sml_dims_xl = gr.CheckboxGroup(label = "XL",choices=[],value = [],type="value",interactive=True,visible = False)
         sml_dims_flux = gr.CheckboxGroup(label = "Flux",choices=[],value = [],type="value",interactive=True,visible = False)
+        sml_dims_anima = gr.CheckboxGroup(label = "Anima",choices=[],value = [],type="value",interactive=True,visible = False)
         with gr.Row(equal_height=False):
             sml_calcdim = gr.Button(elem_id="calcloras", value="Calculate LoRA dimensions",variant='primary')
             sml_calcsets = gr.CheckboxGroup(choices=["Save as CSV","Load from CSV"],show_label=False)
@@ -258,16 +553,17 @@ def on_ui_tabs():
             return (gr.update(choices=selectable, value=[]), 
                     gr.update(visible=True, choices=makedimlist("1.X/2.X")),
                     gr.update(visible=True, choices=makedimlist("XL")),
-                    gr.update(visible=True, choices=makedimlist("Flux"))
+                    gr.update(visible=True, choices=makedimlist("Flux")),
+                    gr.update(visible=True, choices=makedimlist("Anima"))
             )
 
         sml_calcdim.click(
             fn=calculatedim,
             inputs=[sml_calcsets, device],
-            outputs=[sml_loras,sml_dims,sml_dims_xl,sml_dims_flux]
+            outputs=[sml_loras,sml_dims,sml_dims_xl,sml_dims_flux,sml_dims_anima]
         )
 
-        def dimselector(dims, dims_xl, dims_flux, ltypes):
+        def dimselector(dims, dims_xl, dims_flux, dims_anima, ltypes):
             rl={}
             if "Others" in ltypes:ltypes += ["LyCORIS", "unknown"]
             for name, vals in ldict.items():
@@ -277,6 +573,8 @@ def on_ui_tabs():
                 if sdver == "XL" and dim in dims_xl and ltype in ltypes:
                     rl[name] = vals
                 if sdver == "Flux" and dim in dims_flux and ltype in ltypes:
+                    rl[name] = vals
+                if sdver == "Anima" and dim in dims_anima and ltype in ltypes:
                     rl[name] = vals
 
             global selectable
@@ -294,10 +592,11 @@ def on_ui_tabs():
 
         hidenb.change(fn=lambda x: False, outputs = [hidenb])
         sml_loras.change(fn=llister,inputs=[sml_loras,sml_lratio, hidenb],outputs=[sml_loranames])     
-        sml_dims.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_loratypes],outputs=[sml_loras])  
-        sml_dims_xl.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_loratypes],outputs=[sml_loras]) 
-        sml_dims_flux.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_loratypes],outputs=[sml_loras]) 
-        sml_loratypes.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_loratypes],outputs=[sml_loras]) 
+        sml_dims.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_dims_anima,sml_loratypes],outputs=[sml_loras])  
+        sml_dims_xl.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_dims_anima,sml_loratypes],outputs=[sml_loras]) 
+        sml_dims_flux.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_dims_anima,sml_loratypes],outputs=[sml_loras]) 
+        sml_dims_anima.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_dims_anima,sml_loratypes],outputs=[sml_loras]) 
+        sml_loratypes.change(fn=dimselector,inputs=[sml_dims,sml_dims_xl,sml_dims_flux,sml_dims_anima,sml_loratypes],outputs=[sml_loras]) 
 
 ##############################################################
 ####### make LoRA from checkpoint
@@ -807,6 +1106,7 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
 
     isxl = "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.weight" in theta_0.keys()
     isv2 = "cond_stage_model.model.transformer.resblocks.0.attn.out_proj.weight" in theta_0.keys()
+    isanima = any(is_anima_checkpoint_key(k) for k in theta_0.keys())
     isflux = any("double_block" in k for k in theta_0.keys())
     need_revert = prefixer(theta_0) if isflux else False
 
@@ -822,15 +1122,25 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
     keychanger = {}
     for key in theta_0.keys():
         skey = key.replace(".","_").replace("_weight","")
+        register_key_alias(keychanger, skey, key)
         if "conditioner_embedders_" in skey:
-            keychanger[skey.split("conditioner_embedders_",1)[1]] = key
+            register_key_alias(keychanger, skey.split("conditioner_embedders_",1)[1], key)
         else:
             if "wrapped" in skey:
-                keychanger[skey.split("wrapped_",1)[1]] = key
+                register_key_alias(keychanger, skey.split("wrapped_",1)[1], key)
             elif "clip_l" in skey or "t5xxl" in skey:
-                keychanger[skey.replace("text_encoders_","")] = key
+                register_key_alias(keychanger, skey.replace("text_encoders_",""), key)
+            elif "text_encoders_" in skey:
+                register_key_alias(keychanger, skey.replace("text_encoders_",""), key)
+            elif "llm_adapter_" in skey:
+                register_key_alias(keychanger, skey.replace("llm_adapter_",""), key)
             elif "model_" in skey:
-                keychanger[skey.split("model_",1)[1]] = key
+                register_key_alias(keychanger, skey.split("model_",1)[1], key)
+
+        if isanima:
+            for alias in anima_key_aliases_from_checkpoint_key(key):
+                register_key_alias(keychanger, alias, key)
+
 
     lowvramdealer() #web-uiのバグ対策
 
@@ -841,7 +1151,7 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
             orig_checkpoint = None
         checkpoint_info = sd_models.get_closet_checkpoint_match(model)
         if orig_checkpoint != checkpoint_info:
-            sd_models.reload_model_weights(info=checkpoint_info)
+            reload_model_compat(checkpoint_info)
         
         theta_0 = newpluslora(theta_0,filenames,lweis,names, calc_precision, isxl,isv2,isflux, keychanger)
         
@@ -860,7 +1170,7 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
             prefixer(theta_0, True)
 
         if orig_checkpoint:
-            sd_models.reload_model_weights(info=orig_checkpoint)
+            reload_model_compat(orig_checkpoint)
     else:
         theta_0 = oldpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2, keychanger, device)
 
@@ -869,12 +1179,16 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
     settings.append("safetensors")
     result = savemodel(theta_0,dname,output,settings)
 
-    lora.loaded_loras.clear()
-    sd_models.checkpoints_loaded.clear()
+    if hasattr(lora, "loaded_loras") and hasattr(lora.loaded_loras, "clear"):
+        lora.loaded_loras.clear()
+    if hasattr(sd_models, "checkpoints_loaded") and hasattr(sd_models.checkpoints_loaded, "clear"):
+        sd_models.checkpoints_loaded.clear()
     if forge:
         from modules.sd_models import FakeInitialModel
-        sd_models.unload_model_weights()
-        sd_models.checkpoint_info = FakeInitialModel()
+        if hasattr(sd_models, "unload_model_weights"):
+            sd_models.unload_model_weights()
+        if hasattr(sd_models, "checkpoint_info"):
+            sd_models.checkpoint_info = FakeInitialModel()
         load_model(revert_target, reload=True)
 
     del theta_0
@@ -949,12 +1263,12 @@ def newpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2,isflux, 
                 changed = True
             if not changed: "ERROR: {name}weight is not changed"
 
-    errormodules = []
     for net in nets.loaded_networks:
+        errormodules = []
         net.dyn_dim = None
         for name,module in tqdm(net.modules.items(), desc=f"{net.name}"):
             fullkey = convert_diffusers_name_to_compvis(name,isv2)
-            msd_key = fullkey.split(".")[0]
+            msd_key = module_key_from_fullkey(fullkey)
 
             if isxl:
                 if "lora_unet" in msd_key:
@@ -962,10 +1276,10 @@ def newpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2,isflux, 
                 elif "lora_te1_text_model" in msd_key:
                     msd_key = msd_key.replace("lora_te1_text_model", "0_transformer_text_model")
 
-            qvk = ["_q_proj","_k_proj","_v_proj","_out_proj"]
+            qvk = ["_q_proj","_k_proj","_v_proj","_out_proj",".q_proj",".k_proj",".v_proj",".out_proj",".output_proj"]
 
-            if msd_key in keychanger.keys():
-                wkey = keychanger[msd_key]
+            wkey, matched_key = resolve_checkpoint_weight_key(msd_key, keychanger)
+            if wkey is not None:
                 bkey = wkey.replace("weight","bias")
                 if bkey in theta_0.keys():
                     theta_0[wkey], theta_0[bkey]= plusweights(theta_0[wkey], module, bias = theta_0[bkey])
@@ -974,14 +1288,24 @@ def newpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2,isflux, 
 
             else:
                 if any(x in name for x in qvk):
-                    for x in qvk:
-                        if x in name:
-                            inkey,outkey = name.replace(x,"") + "_in_proj" ,name.replace(x,"") + "_out_proj"
-                    bkey = keychanger[outkey].replace("weight","bias")
-                    if bkey in theta_0.keys():
-                        theta_0[keychanger[inkey]] ,theta_0[keychanger[outkey]], theta_0[bkey]= plusweightsqvk(theta_0[keychanger[inkey]],theta_0[keychanger[outkey]], name ,module, net, bias = theta_0[bkey])
+                    inkey, outkey = resolve_qkv_group_keys(name, keychanger)
+                    if inkey in keychanger and outkey in keychanger:
+                        bkey = keychanger[outkey].replace("weight","bias")
+                        if bkey in theta_0.keys():
+                            theta_0[keychanger[inkey]] ,theta_0[keychanger[outkey]], theta_0[bkey]= plusweightsqvk(theta_0[keychanger[inkey]],theta_0[keychanger[outkey]], name ,module, net, bias = theta_0[bkey])
+                        else:
+                            theta_0[keychanger[inkey]] ,theta_0[keychanger[outkey]], _= plusweightsqvk(theta_0[keychanger[inkey]],theta_0[keychanger[outkey]], name ,module, net)
                     else:
-                        theta_0[keychanger[inkey]] ,theta_0[keychanger[outkey]], _= plusweightsqvk(theta_0[keychanger[inkey]],theta_0[keychanger[outkey]], name ,module, net)
+                        resolved_inkey, _ = resolve_checkpoint_weight_key(inkey, keychanger) if inkey else (None, None)
+                        resolved_outkey, _ = resolve_checkpoint_weight_key(outkey, keychanger) if outkey else (None, None)
+                        if resolved_inkey is not None and resolved_outkey is not None:
+                            bkey = resolved_outkey.replace("weight","bias")
+                            if bkey in theta_0.keys():
+                                theta_0[resolved_inkey], theta_0[resolved_outkey], theta_0[bkey] = plusweightsqvk(theta_0[resolved_inkey], theta_0[resolved_outkey], name, module, net, bias=theta_0[bkey])
+                            else:
+                                theta_0[resolved_inkey], theta_0[resolved_outkey], _ = plusweightsqvk(theta_0[resolved_inkey], theta_0[resolved_outkey], name, module, net)
+                        else:
+                            errormodules.append(msd_key)
                 else:
                     errormodules.append(msd_key)
                     
@@ -1014,6 +1338,8 @@ def plusweightsqvk(inweight, outweight, network_layer_name, module ,net,bias = N
         module_k = net.modules.get(network_layer_name + "_k_proj", None)
         module_v = net.modules.get(network_layer_name + "_v_proj", None)
         module_out = net.modules.get(network_layer_name + "_out_proj", None)
+        if module_out is None:
+            module_out = net.modules.get(network_layer_name + "_output_proj", None)
 
         if module_q and module_k and module_v and module_out:
             with torch.no_grad():
@@ -1031,6 +1357,21 @@ def plusweightsqvk(inweight, outweight, network_layer_name, module ,net,bias = N
                     bias += ex_bias
 
     return inweight,outweight,bias
+
+def resolve_qkv_group_keys(name, keychanger):
+    qkv_suffixes = ["_q_proj", "_k_proj", "_v_proj", "_out_proj", "_output_proj", ".q_proj", ".k_proj", ".v_proj", ".out_proj", ".output_proj"]
+    for suffix in qkv_suffixes:
+        if suffix in name:
+            base = name.rsplit(suffix, 1)[0]
+            if suffix.startswith("."):
+                inkey = base + ".in_proj"
+                out_candidates = [base + ".out_proj", base + ".output_proj"]
+            else:
+                inkey = base + "_in_proj"
+                out_candidates = [base + "_out_proj", base + "_output_proj"]
+            outkey = next((candidate for candidate in out_candidates if candidate in keychanger), out_candidates[0])
+            return inkey, outkey
+    return None, None
 
 def lbw(lora,lwei,isv2,isflux=False):
     errormodules = []
@@ -1050,6 +1391,14 @@ def lbw(lora,lwei,isv2,isflux=False):
                 picked = True
 
         else:
+            anima_block = re.search(r"(?:^|[._])blocks[._](\d+)(?:[._]|$)", key)
+            if anima_block:
+                block_index = int(anima_block.group(1))
+                ratio = lwei[min(block_index + 1, len(lwei) - 1)]
+                picked = True
+            elif key.startswith("layers_") or "model_layers_" in key or ".model.layers." in key:
+                ratio = lwei[0]
+                picked = True
             for i,block in enumerate(blocks):
                 if block in key:
                     if i == 26 or i == 27: i=0
@@ -1187,7 +1536,10 @@ def dimgetter(filename, device = "cpu"):
     dim = None
     ltype = None
 
-    if "lora_unet_down_blocks_0_resnets_0_conv1.lora_down.weight" in lora_sd.keys():
+    if any(is_anima_lora_key(key) for key in lora_sd.keys()):
+        sdx = "Anima"
+
+    elif "lora_unet_down_blocks_0_resnets_0_conv1.lora_down.weight" in lora_sd.keys():
       ltype = "LoCon"
       if type(lora_sd["lora_unet_down_blocks_0_resnets_0_conv1.lora_down.weight"]) is dict:
           lora_sd, _, _ = load_state_dict(filename, torch.float, device)
@@ -1652,6 +2004,22 @@ def convert_diffusers_name_to_compvis(key, is_sd2):
         else:
             return f"1_model_transformer_resblocks_{m[0]}_{m[1].replace('self_attn', 'attn')}"
 
+    if key.startswith("lora_unet_") and is_anima_lora_key(key):
+        return "model_diffusion_model_" + key.split("lora_unet_", 1)[1]
+
+    if key.startswith("oft_unet_") and (
+        "blocks_" in key or "patch_embed" in key or "final_layer" in key or "t_embedder" in key
+    ):
+        return "model_diffusion_model_" + key.split("oft_unet_", 1)[1]
+
+    if key.startswith("lora_te_") and (
+        "text_encoders_" in key or "llm_adapter_" in key
+    ):
+        return key.split("lora_te_", 1)[1]
+
+    if match(m, r"lora_te_layers_(\d+)_(.+)"):
+        return f"layers_{m[0]}_{m[1]}"
+
     #for flux
     if match(m, r"lora_unet_double_blocks_(\d+)_(img|txt)_(attn|mlp|mod)_(proj|qkv|lin|\d+)(.*)"):
         block_type = m[1]  # img or txt
@@ -1719,11 +2087,35 @@ def get_flux_blocks(key):
 
 def read_model_state_dict(checkpoint_info, device):
     if forge:
-        from backend.utils import load_torch_file
+        from backend.utils import get_state_dict_after_quant, load_torch_file
+        from modules.sd_models import model_data
         load_model(checkpoint_info)
+        additional_modules = model_data.forge_loading_parameters.get("additional_modules", [])
+        if additional_modules and shared.sd_model is not None and hasattr(shared.sd_model, "forge_objects"):
+            sd = {}
+            sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.unet.model.diffusion_model, prefix="model.diffusion_model."))
+            sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.clip.cond_stage_model, prefix="text_encoders."))
+            sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.vae.first_stage_model, prefix="vae."))
+            return sd
         return load_torch_file(checkpoint_info.filename,device=CUDA if "cuda" in device else CPU)
-    else:
-        return sd_models.read_state_dict(checkpoint_info.filename,map_location=device)
+    if hasattr(sd_models, "read_state_dict"):
+        try:
+            return sd_models.read_state_dict(checkpoint_info.filename, map_location=device)
+        except TypeError:
+            return sd_models.read_state_dict(checkpoint_info.filename)
+
+    try:
+        from backend.utils import load_torch_file
+        return load_torch_file(checkpoint_info.filename, device=torch.device(device))
+    except Exception:
+        if checkpoint_info.filename.endswith(".safetensors"):
+            return load_file(checkpoint_info.filename, device=device)
+        return torch.load(checkpoint_info.filename, map_location=device)
+
+def reload_model_compat(checkpoint_info):
+    if hasattr(sd_models, "reload_model_weights"):
+        return sd_models.reload_model_weights(info=checkpoint_info)
+    return load_model(checkpoint_info, reload=True)
     
 def load_model(checkpoint_info, reload = False):
     if forge:
