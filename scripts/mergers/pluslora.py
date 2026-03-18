@@ -2192,16 +2192,11 @@ def read_model_state_dict(checkpoint_info, device):
             clip_sd = get_state_dict_after_quant(shared.sd_model.forge_objects.clip.cond_stage_model, prefix="text_encoders.")
             # Forge Anima checkpoints are recognized only when llm_adapter is stored
             # under model.diffusion_model.llm_adapter.*, not under text_encoders.*.
-            for key in list(clip_sd.keys()):
-                if ".llm_adapter." not in key:
-                    continue
-
+            llm_adapter_keys = [key for key in clip_sd.keys() if ".llm_adapter." in key]
+            for key in llm_adapter_keys:
                 _, _, suffix = key.partition(".llm_adapter.")
-                if not suffix:
-                    continue
-
-                sd[f"model.diffusion_model.llm_adapter.{suffix}"] = clip_sd.pop(key)
-
+                if suffix:
+                    sd[f"model.diffusion_model.llm_adapter.{suffix}"] = clip_sd.pop(key)
             sd.update(clip_sd)
             sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.vae.first_stage_model, prefix="vae."))
             return sd

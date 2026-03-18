@@ -137,7 +137,7 @@ def smergegen(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,m
 
     if save and (forge or neo):
         model_loader(checkpoint_info, theta_0, metadata, currentmodel)
-        result = forge_save(custom_name if custom_name else currentmodel)
+        result = forge_save(custom_name if custom_name else currentmodel, save_sets)
     else:
         result = savemodel(theta_0,currentmodel,custom_name,save_sets,metadata) if save else "Merged model loaded:"+currentmodel
         model_loader(checkpoint_info, theta_0, metadata, currentmodel)
@@ -185,7 +185,6 @@ def normalize_anima_merge_state_dict(state_dict):
             remapped[key] = value
 
     if changed:
-        print('Normalized Anima state dict keys to "model.diffusion_model." prefix.')
         return remapped
 
     return state_dict
@@ -193,6 +192,10 @@ def normalize_anima_merge_state_dict(state_dict):
 
 def is_anima_state_dict(state_dict):
     return any(marker in key for key in state_dict.keys() for marker in ANIMA_MODEL_KEY_MARKERS)
+
+
+def mbw_value_or_default(weights, index, default):
+    return weights[index] if 0 <= index < len(weights) else default
 
 # XXX hack. fake checkpoint_info
 def fake_checkpoint_info(checkpoint_info,metadata={},currentmodel=""):
@@ -396,6 +399,12 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
         if len(weights_a) == 19: weights_a = weights_a + [0]
         if len(weights_b) == 19: weights_b = weights_b + [0]
 
+    if isanima and useblocks:
+        if len(weights_a) != 28:
+            return "ERROR: weights alpha value must be 29 for Anima.",*NON4
+        if usebeta and len(weights_b) != 28:
+            return "ERROR: weights beta value must be 29 for Anima.",*NON4
+
     if stopmerge: return "STOPPED", *NON4
     if not (MODES[0] in mode): #Add, Twice, Triple
         theta_2 = load_model_weights_m(model_c,3,cachetarget,device).copy()
@@ -499,24 +508,24 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
         if useblocks:
             if weight_index > 0:
                 if skip:weights_a_excluded[weight_index] = 0
-                current_alpha = weights_a[weight_index - 1] 
+                current_alpha = mbw_value_or_default(weights_a, weight_index - 1, base_alpha)
                 if len(weights_a) == 109:
                     if skip:weights_a_excluded[weight_index_xl] = 0
-                    current_alpha = weights_a[weight_index_xl - 1] 
-                
+                    current_alpha = mbw_value_or_default(weights_a, weight_index_xl - 1, base_alpha)
+                 
                 if usebeta:
                     if skip:weights_b_excluded[weight_index] = 0
-                    current_beta = weights_b[weight_index - 1]
+                    current_beta = mbw_value_or_default(weights_b, weight_index - 1, base_beta)
                     if len(weights_b) == 109:
                         if skip:weights_b_excluded[weight_index_xl] = 0
-                        current_alpha = weights_b[weight_index_xl - 1]
+                        current_beta = mbw_value_or_default(weights_b, weight_index_xl - 1, base_beta)
             if weight_index == 0:
                 if len(weights_a) == 109 and weight_index_xl == 1:
                     if skip:weights_a_excluded[weight_index_xl] = 0
-                    current_alpha = weights_a[weight_index_xl - 1] 
+                    current_alpha = mbw_value_or_default(weights_a, weight_index_xl - 1, base_alpha)
                 if len(weights_b) == 109 and usebeta and weight_index_xl == 1:
                     if skip:weights_b_excluded[weight_index_xl] = 0
-                    current_alpha = weights_b[weight_index_xl - 1]
+                    current_beta = mbw_value_or_default(weights_b, weight_index_xl - 1, base_beta)
                 
                 if skip:weights_a_excluded[0] = 0
                 if skip:weights_b_excluded[0] = 0
@@ -1817,10 +1826,12 @@ def reload_model_weights(info=None):
     return sd_models.model_data.sd_model, False
 
 orig_reload_model_weights = None
+orig_forge_model_reload = None
 
 
 if forge or neo:
     from modules import sd_models as fsd
+    from modules import processing as forge_processing
     from modules.timer import Timer
     from backend import loader as fld
     import huggingface_guess
@@ -1880,6 +1891,30 @@ def load_forge_model(state_dict,checkpoint_info = None):
         unet_storage_dtype=fsd.dynamic_args['forge_unet_storage_dtype']
     )
 
+def merged_forge_model_reload():
+    params = fsd.model_data.forge_loading_parameters
+    current_hash = str(params)
+
+    if fsd.model_data.forge_hash == current_hash:
+        return fsd.model_data.sd_model, False
+
+    state_dict_override = params.get("state_dict_override")
+    if state_dict_override is None:
+        return orig_forge_model_reload()
+
+    checkpoint_info = params.get("checkpoint_info")
+    if checkpoint_info is None:
+        raise ValueError("Failed to find available model...")
+
+    load_forge_model(state_dict_override, checkpoint_info)
+    return fsd.model_data.sd_model, True
+
+
+if forge or neo:
+    orig_forge_model_reload = fsd.forge_model_reload
+    fsd.forge_model_reload = merged_forge_model_reload
+    forge_processing.forge_model_reload = merged_forge_model_reload
+
 COMP_NAME_AND_PREFIX = {"transformer":PREFIX_M, "text_encoder": "clip_l" , "text_encoder2": "t5xxl", "vae": "vae."}
 
 @torch.inference_mode()
@@ -1933,6 +1968,12 @@ def split_state_dict(sd, additional_state_dicts: list = None):
         state_dict[v] = fld.try_filter_state_dict(sd, [k + '.'])
 
     state_dict['ignore'] = sd
+    if "Anima" in getattr(guess, "huggingface_repo", ""):
+        transformer_sd = state_dict.get("transformer", {})
+        text_encoder_sd = state_dict.get("text_encoder", {})
+        for key in list(transformer_sd.keys()):
+            if key.startswith("llm_adapter."):
+                text_encoder_sd[key] = transformer_sd.pop(key)
     print_dict = {k: len(v) for k, v in state_dict.items()}
     print(f'StateDict Keys: {print_dict}')
 
@@ -1958,17 +1999,37 @@ def prefixer(t, revert = False):
     gc.collect()
     return need_revert
 
-def forge_save(filename):
+def forge_save(filename, save_sets):
     print("Saveing Model...")
     from modules.paths import models_path
+    from backend.utils import get_state_dict_after_quant
+    import safetensors.torch
     if ".safetensors" not in filename:
         filename = filename +".safetensors"
     long_filename = os.path.join(models_path, 'Stable-diffusion', filename)
     os.makedirs(os.path.dirname(long_filename), exist_ok=True)
     from modules import shared
-    p = shared.sd_model.save_checkpoint(long_filename)
-    print(f'Saved checkpoint at: {p}')
-    return f'Saved checkpoint at: {p}'
+
+    if os.path.isfile(long_filename) and "overwrite" not in save_sets:
+        print(f"Output file ({long_filename}) existed and was not saved]")
+        return f"Output file ({long_filename}) existed and was not saved]"
+
+    sd = {}
+    sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.unet.model.diffusion_model, prefix="model.diffusion_model."))
+
+    clip_sd = get_state_dict_after_quant(shared.sd_model.forge_objects.clip.cond_stage_model, prefix="text_encoders.")
+    llm_adapter_keys = [key for key in clip_sd.keys() if ".llm_adapter." in key]
+    for key in llm_adapter_keys:
+        _, _, suffix = key.partition(".llm_adapter.")
+        if suffix:
+            sd[f"model.diffusion_model.llm_adapter.{suffix}"] = clip_sd.pop(key)
+
+    sd.update(clip_sd)
+    sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.vae.first_stage_model, prefix="vae."))
+
+    safetensors.torch.save_file(sd, long_filename)
+    print(f'Saved checkpoint at: {long_filename}')
+    return f'Saved checkpoint at: {long_filename}'
 
 ###############################################################
 ######## QLoRA   
