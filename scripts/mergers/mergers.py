@@ -190,6 +190,10 @@ def normalize_anima_merge_state_dict(state_dict):
 
     return state_dict
 
+
+def is_anima_state_dict(state_dict):
+    return any(marker in key for key in state_dict.keys() for marker in ANIMA_MODEL_KEY_MARKERS)
+
 # XXX hack. fake checkpoint_info
 def fake_checkpoint_info(checkpoint_info,metadata={},currentmodel=""):
     from modules import cache
@@ -235,6 +239,17 @@ BLOCKIDXL=['BASE', 'IN0', 'IN1', 'IN2', 'IN3', 'IN4', 'IN5', 'IN6', 'IN7', 'IN8'
 BLOCKIDXLLL=["CLIPL","CLIPG","IN0","IN00","IN10","IN20","IN30","IN40","IN41","IN410","IN411","IN50","IN51","IN510","IN511","IN60","IN70","IN71","IN710","IN711","IN712","IN713","IN714","IN715","IN716","IN717","IN718","IN719","IN80","IN81","IN810","IN811","IN812","IN813","IN814","IN815","IN816","IN817","IN818","IN819","MID00","MID10","MID100","MID101","MID102","MID103","MID104","MID105","MID106","MID107","MID108","MID109","MID20","OUT00","OUT01","OUT010","OUT011","OUT012","OUT013","OUT014","OUT015","OUT016","OUT017","OUT018","OUT019","OUT10","OUT11","OUT110","OUT111","OUT112","OUT113","OUT114","OUT115","OUT116","OUT117","OUT118","OUT119","OUT20","OUT21","OUT210","OUT211","OUT212","OUT213","OUT214","OUT215","OUT216","OUT217","OUT218","OUT219","OUT22","OUT30","OUT31","OUT310","OUT311","OUT40","OUT41","OUT410","OUT411","OUT50","OUT51","OUT510","OUT511","OUT52","OUT60","OUT70","OUT80","OUT9","TIME","LABEL", "VAE"]
 BLOCKIDXLLS=["BASE", "BASE" ,"IN0","IN00","IN01","IN02","IN03","IN04","IN04","IN04" ,"IN04" ,"IN05","IN05","IN05" ,"IN05" ,"IN06","IN07","IN07","IN07" ,"IN07" ,"IN07" ,"IN07" ,"IN07" ,"IN07" ,"IN07" ,"IN07" ,"IN07" ,"IN07" ,"IN08","IN08","IN08" ,"IN08" ,"IN08" ,"IN08" ,"IN08" ,"IN08" ,"IN08" ,"IN08" ,"IN08" ,"IN08" ,"M00"  ,"M00"   ,"M00"   ,"M00"   ,"M00"   ,"M00"   ,"M00"   ,"M00"   ,"M00"   ,"M00"   ,"M00"   ,"M00"  ,"M00"  ,"OUT00","OUT00","OUT00" ,"OUT00" ,"OUT00" ,"OUT00" ,"OUT00" ,"OUT00" ,"OUT00" ,"OUT00" ,"OUT00" ,"OUT00" ,"OUT01","OUT01","OUT01" ,"OUT01" ,"OUT01" ,"OUT01" ,"OUT01" ,"OUT01" ,"OUT01" ,"OUT01" ,"OUT01" ,"OUT01" ,"OUT02","OUT02","OUT02" ,"OUT02" ,"OUT02" ,"OUT02" ,"OUT02" ,"OUT02" ,"OUT02" ,"OUT02" ,"OUT02" ,"OUT02" ,"OUT02","OUT03","OUT03","OUT03" ,"OUT03" ,"OUT04","OUT04","OUT04" ,"OUT04" ,"OUT05","OUT05","OUT05" ,"OUT05","OUT05","OUT06","OUT07","OUT08","OUT08", "Not Merge", "Not Merge", "VAE"]
 BLOCKIDFLUX = ["CLIP", "T5", "IN"] + ["D{:002}".format(x) for x in range(19)] + ["S{:002}".format(x) for x in range(38)] + ["OUT"] # Len: 61
+BLOCKIDANIMA = ["BASE"] + [f"B{x:02d}" for x in range(28)]
+
+ANIMA_MODEL_KEY_MARKERS = (
+    "model.diffusion_model.blocks.",
+    "model.diffusion_model.patch_embed.",
+    "model.diffusion_model.final_layer.",
+    "model.diffusion_model.t_embedder.",
+    "text_encoders.qwen3_06b.transformer.model.layers.",
+    "text_encoders.qwen3.transformer.model.layers.",
+    "text_encoders.qwen25_7b.model.layers.",
+)
 RANDMAP = [0,50,100] #alpha,beta,elements
 
 statistics = {"sum":{},"mean":{},"max":{},"min":{}}
@@ -345,12 +360,12 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
         base_alpha  = float(weights_a_t[0])    
         weights_a = [float(w) for w in weights_a_t[1].split(',')]
         caster(f"from {weights_a_t}, alpha = {base_alpha},weights_a ={weights_a}",hearm)
-        if not (len(weights_a) == 25 or len(weights_a) == 19 or len(weights_a) == 60 or len(weights_a) ==109):return f"ERROR: weights alpha value must be 20 or 26 or 61, or 110.",*NON4
+        if not (len(weights_a) == 25 or len(weights_a) == 19 or len(weights_a) == 28 or len(weights_a) == 60 or len(weights_a) ==109):return f"ERROR: weights alpha value must be 20 or 26 or 29, or 61, or 110.",*NON4
         if usebeta:
             base_beta = float(weights_b_t[0]) 
             weights_b = [float(w) for w in weights_b_t[1].split(',')]
             caster(f"from {weights_b_t}, beta = {base_beta},weights_a ={weights_b}",hearm)
-            if not(len(weights_b) == 25 or len(weights_b) == 19 or len(weights_a) == 60 or len(weights_a) == 109): return f"ERROR: weights beta value must be 20 or 26 or 61, or 110.",*NON4
+            if not(len(weights_b) == 25 or len(weights_b) == 19 or len(weights_b) == 28 or len(weights_b) == 60 or len(weights_b) == 109): return f"ERROR: weights beta value must be 20 or 26 or 29, or 61, or 110.",*NON4
 
     #model loading start 
     caster("Model loading start",hearm)
@@ -362,6 +377,7 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
     
     isxl = "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.weight" in theta_1.keys()
     isflux = any("double_block" in k for k in theta_1.keys())
+    isanima = is_anima_state_dict(theta_1)
 
     #adjust
     if fine.rstrip(",0") != "":
@@ -463,12 +479,14 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
 
         assert_inpaint(a, b, key)
 
-        block,blocks26 = blockfromkey(key,isxl,isflux)
+        block,blocks26 = blockfromkey(key,isxl,isflux,isanima)
         
         #if block == "Not Merge": continue
         skip = inex != "Off" and (ex_blocks or (ex_elems != [""])) and excluder(block,blocks26,inex,ex_blocks,ex_elems,key)
         if isflux and blocks26 in BLOCKIDFLUX:
             weight_index = BLOCKIDFLUX.index(blocks26)
+        elif isanima and blocks26 in BLOCKIDANIMA:
+            weight_index = BLOCKIDANIMA.index(blocks26)
         elif isxl and blocks26 in BLOCKIDXLL:
             weight_index = BLOCKIDXLL.index(blocks26)
         elif blocks26 in BLOCKID:
@@ -1483,7 +1501,37 @@ def blocker(blocks,blockids):
     return output
 
 
-def blockfromkey(key,isxl,isflux=False):
+def blockfromkey(key,isxl,isflux=False,isanima=False):
+    if isanima:
+        if "first_stage_model" in key or key.startswith("vae."):
+            return "VAE", "BASE"
+        if ".model.layers." in key:
+            match = re.search(r"\.model\.layers\.(\d+)\.", key)
+            if match:
+                block = f"B{int(match.group(1)):02d}"
+                return block, block
+            return "BASE", "BASE"
+        if "model.diffusion_model.blocks." in key:
+            match = re.search(r"model\.diffusion_model\.blocks\.(\d+)\.", key)
+            if match:
+                block = f"B{int(match.group(1)):02d}"
+                return block, block
+            return "BASE", "BASE"
+        if any(token in key for token in (
+            "model.diffusion_model.patch_embed.",
+            "model.diffusion_model.final_layer.",
+            "model.diffusion_model.t_embedder.",
+            "model.diffusion_model.x_embedder.",
+            "model.diffusion_model.y_embedder.",
+            "model.diffusion_model.context_processor.",
+            "model.diffusion_model.pos_embed",
+            "model.diffusion_model.rope",
+            "text_encoders.",
+            "llm_adapter.",
+        )):
+            return "BASE", "BASE"
+        return "Not Merge", "Not Merge"
+
     if not isxl and not isflux:
         re_inp = re.compile(r'\.input_blocks\.(\d+)\.')  # 12
         re_mid = re.compile(r'\.middle_block\.(\d+)\.')  # 1

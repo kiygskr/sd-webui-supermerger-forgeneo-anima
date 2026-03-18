@@ -36,8 +36,9 @@ BLOCKID26=["BASE","IN00","IN01","IN02","IN03","IN04","IN05","IN06","IN07","IN08"
 BLOCKID17=["BASE","IN01","IN02","IN04","IN05","IN07","IN08","M00","OUT03","OUT04","OUT05","OUT06","OUT07","OUT08","OUT09","OUT10","OUT11"]
 BLOCKID12=["BASE","IN04","IN05","IN07","IN08","M00","OUT00","OUT01","OUT02","OUT03","OUT04","OUT05"]
 BLOCKID20=["BASE","IN00","IN01","IN02","IN03","IN04","IN05","IN06","IN07","IN08","M00","OUT00","OUT01","OUT02","OUT03","OUT04","OUT05","OUT06","OUT07","OUT08"]
-BLOCKNUMS = [12,17,20,26,61]
-BLOCKIDS=[BLOCKID12,BLOCKID17,BLOCKID20,BLOCKID26]
+BLOCKIDANIMA=["BASE"] + [f"B{x:02d}" for x in range(28)]
+BLOCKNUMS = [12,17,20,26,29,61]
+BLOCKIDS=[BLOCKID12,BLOCKID17,BLOCKID20,BLOCKID26,BLOCKIDANIMA]
 ANIMA_KEY_MARKERS = (
     "lora_unet_blocks_",
     "lora_unet_patch_embed",
@@ -63,12 +64,53 @@ ANIMA_QWEN_MODEL_LAYER_PREFIXES = (
 )
 
 def to26(ratios):
-    if len(ratios) == 26 or len(ratios) > 40 : return ratios
+    if len(ratios) in (26, 29) or len(ratios) > 40 : return ratios
     ids = BLOCKIDS[BLOCKNUMS.index(len(ratios))]
     output = [0]*26
     for i, id in enumerate(ids):
         output[BLOCKID26.index(id)] = ratios[i]
     return output
+
+
+def default_ratio_for_length(length, value):
+    return [float(value)] * length
+
+
+def detect_ratio_length_from_text(text):
+    count = text.count(",") + 1
+    if count in BLOCKNUMS:
+        return count
+    return 26
+
+
+def default_ratio_length_for_lora(filename):
+    try:
+        header = load_state_header(filename, torch.float)
+        if any(is_anima_lora_key(key) for key in header.keys()):
+            return 29
+    except Exception:
+        pass
+    return 26
+
+
+def ui_weight_blocks(weight_type):
+    if weight_type == "XL":
+        return BLOCKID20
+    if weight_type == "Anima":
+        return BLOCKIDANIMA
+    if weight_type == "Flux":
+        return BLOCKIDFLUX
+    return BLOCKID26
+
+
+def ui_weight_placeholder(weight_type):
+    return ",".join(ui_weight_blocks(weight_type))
+
+
+def ratio_at(ratios, index):
+    if index < len(ratios):
+        return ratios[index]
+    return ratios[0] if len(ratios) > 0 else 1.0
 
 def to61s(ratioss):
     out = []
@@ -436,10 +478,13 @@ def on_ui_tabs():
             components.frompromptb = gr.Button(elem_id="slm_deselectall", value="get from prompt",variant='primary')
             hidenb = gr.Checkbox(value = False,visible = False)
         sml_loras = gr.CheckboxGroup(label = "LoRAs on disk",choices = selectable,type="value",interactive=True,visible = True)
+        sml_weight_type = gr.Radio(label="Weights type", choices=["1.X/2.X", "XL", "Flux", "Anima"], value="1.X/2.X", type="value")
+        sml_weight_labels = gr.Textbox(label="Block labels", value=ui_weight_placeholder("1.X/2.X"), interactive=False)
         sml_loraratios = gr.TextArea(label="",value=sml_lbwpresets,visible =True,interactive  = True)  
 
         sml_selectall.click(fn = lambda x:gr.update(value = selectable),outputs = [sml_loras])
         sml_deselectall.click(fn = lambda x:gr.update(value =[]),outputs = [sml_loras])
+        sml_weight_type.change(fn=lambda weight_type: gr.update(value=ui_weight_placeholder(weight_type)), inputs=[sml_weight_type], outputs=[sml_weight_labels])
 
         with gr.Row():
             changediffusers = gr.Button(elem_id=f"change_diffusers_version", value=f"change diffusers version(now:{d_ver})",variant='primary')
@@ -702,20 +747,22 @@ def lmerge(loranames,loraratioss,settings,filename,dim,save_precision,calc_preci
         dmax = 1
 
         for i,n in enumerate(lnames):
+            c_lora = lora.available_loras.get(n[0], None)
+            ratio_length = default_ratio_length_for_lora(c_lora.filename) if c_lora is not None else 26
             if len(n) ==2:
-                ratio = [float(n[1])]*26
+                ratio = default_ratio_for_length(ratio_length, n[1])
             elif len(n) ==3:
                 if n[2].strip() in ldict:
                     ratio = [float(r)*float(n[1]) for r in ldict[n[2]].split(",")]
                     ratio = to26(ratio)
-                else:ratio = [float(n[1])]*26
+                else:
+                    ratio = default_ratio_for_length(ratio_length, n[1])
             elif len(n[2:]) in BLOCKNUMS:
                 ratio = [float(x) for x in n[2:]]
                 ratio = to26(ratio)
             else:
-                print("ERROR:Number of Blocks must be 12,17,20,26")
-                ratio = [float(n[1])]*26
-            c_lora = lora.available_loras.get(n[0], None) 
+                print("ERROR:Number of Blocks must be 12,17,20,26,29")
+                ratio = default_ratio_for_length(ratio_length, n[1])
             ln.append(c_lora.filename)
             lr.append(ratio)
             d, t, s = dimgetter(c_lora.filename, device)
@@ -810,7 +857,7 @@ def merge_lora_models(models, ratios, sets, locon, calc_precision, device):
             base_alpha = base_alphas[lora_module_name]
             alpha = alphas[lora_module_name]
 
-            ratio = ratios[blockfromkey(key, keylist, isv2)]
+            ratio = ratio_at(ratios, blockfromkey(key, keylist, isv2))
             #print(key,blockfromkey(key, keylist, isv2))
             
             if "same to Strength" in sets:
@@ -902,7 +949,7 @@ def merge_lora_models_dim(models, ratios, new_rank, sets, device, calc_precision
                             down_weight.permute(1, 0, 2, 3), up_weight
                         ).permute(1, 0, 2, 3)
 
-                    block_ratio = ratio[blockfromkey(down_key, LBLCOKS26, isv2)]
+                    block_ratio = ratio_at(ratio, blockfromkey(down_key, LBLCOKS26, isv2))
                     fugou = 1
                     if "same to Strength" in sets:
                         block_ratio, fugou = (block_ratio ** 0.5, 1) if block_ratio > 0 else (abs(block_ratio) ** 0.5, -1)
@@ -1026,7 +1073,7 @@ def lycomerge(filename, ratios, calc_precision, device):
 
         for i,block in enumerate(LBLCOKS26):
             if block in key:
-                ratio = ratios[i]
+                ratio = ratio_at(ratios, i)
                 picked = True
         if not picked: keys_failed_to_match.append(key)
 
@@ -1068,19 +1115,22 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
     names, filenames, lweis = [], [], []
 
     for n in lnames:
+        c_lora = lora.available_loras.get(n[0], lora.available_lora_aliases.get(n[0],None))
+        ratio_length = default_ratio_length_for_lora(c_lora.filename) if c_lora is not None else 26
         if len(n) ==2:
-            ratio = [float(n[1])]*26
+            ratio = default_ratio_for_length(ratio_length, n[1])
         elif len(n) ==3:
             if n[2].strip() in ldict:
                 ratio = [float(r)*float(n[1]) for r in ldict[n[2]].split(",")]
                 ratio = to26(ratio)
-            else:ratio = [float(n[1])]*26
+            else:
+                ratio = default_ratio_for_length(ratio_length, n[1])
         elif len(n[2:]) in BLOCKNUMS:
             ratio = [float(x) for x in n[2:]]
             ratio = to26(ratio)
-        else:ratio = [float(n[1])]*26
- 
-        c_lora = lora.available_loras.get(n[0], lora.available_lora_aliases.get(n[0],None)) 
+        else:
+            ratio = default_ratio_for_length(ratio_length, n[1])
+
         names.append(n[0])
         filenames.append(c_lora.filename)
         lweis.append(ratio)
@@ -1396,9 +1446,19 @@ def lbw(lora,lwei,isv2,isflux=False):
                 block_index = int(anima_block.group(1))
                 ratio = lwei[min(block_index + 1, len(lwei) - 1)]
                 picked = True
-            elif key.startswith("layers_") or "model_layers_" in key or ".model.layers." in key:
-                ratio = lwei[0]
-                picked = True
+            else:
+                anima_layer = (
+                    re.search(r"^layers_(\d+)_", key)
+                    or re.search(r"_model_layers_(\d+)_", key)
+                    or re.search(r"\.model\.layers\.(\d+)\.", key)
+                )
+                if anima_layer:
+                    layer_index = int(anima_layer.group(1))
+                    ratio = lwei[min(layer_index + 1, len(lwei) - 1)]
+                    picked = True
+                elif key.startswith("layers_") or "model_layers_" in key or ".model.layers." in key:
+                    ratio = lwei[0]
+                    picked = True
             for i,block in enumerate(blocks):
                 if block in key:
                     if i == 26 or i == 27: i=0
@@ -1535,8 +1595,9 @@ def dimgetter(filename, device = "cpu"):
     alpha = None
     dim = None
     ltype = None
+    isanima = any(is_anima_lora_key(key) for key in lora_sd.keys())
 
-    if any(is_anima_lora_key(key) for key in lora_sd.keys()):
+    if isanima:
         sdx = "Anima"
 
     elif "lora_unet_down_blocks_0_resnets_0_conv1.lora_down.weight" in lora_sd.keys():
@@ -1545,7 +1606,11 @@ def dimgetter(filename, device = "cpu"):
           lora_sd, _, _ = load_state_dict(filename, torch.float, device)
       _, _, dim, _ = dimalpha(lora_sd)
 
-    if "lora_unet_input_blocks_4_1_transformer_blocks_1_attn1_to_k.lora_down.weight" in lora_sd.keys():
+    if isanima:
+        if any(type(v) is dict for v in lora_sd.values()):
+            lora_sd, _, _ = load_state_dict(filename, torch.float, device)
+        _, _, dim, _ = dimalpha(lora_sd)
+    elif "lora_unet_input_blocks_4_1_transformer_blocks_1_attn1_to_k.lora_down.weight" in lora_sd.keys():
         sdx = "XL"
         if type(lora_sd["lora_unet_input_blocks_4_1_transformer_blocks_1_attn1_to_k.lora_down.weight"]) is dict:
             lora_sd, _, _ = load_state_dict(filename, torch.float, device)
@@ -1597,6 +1662,36 @@ def blockfromkey(key,keylist,isv2 = False):
         fullkey = fullkey.replace("lora_te1_text_model", "0_transformer_text_model")
 
     if "1_model_transformer_resblocks_" in fullkey:return 0
+
+    anima_block = (
+        re.search(r"lora_unet_blocks_(\d+)_", key)
+        or re.search(r"(?:^|[._])blocks[._](\d+)(?:[._]|$)", fullkey)
+    )
+    if anima_block:
+        return int(anima_block.group(1)) + 1
+
+    anima_layer = (
+        re.search(r"lora_te_layers_(\d+)_", key)
+        or re.search(r"^layers_(\d+)_", fullkey)
+        or re.search(r"_model_layers_(\d+)_", fullkey)
+        or re.search(r"\.model\.layers\.(\d+)\.", fullkey)
+    )
+    if anima_layer:
+        return int(anima_layer.group(1)) + 1
+
+    if any(marker in key or marker in fullkey for marker in (
+        "lora_unet_patch_embed",
+        "lora_unet_final_layer",
+        "lora_unet_t_embedder",
+        "lora_te_text_encoders_",
+        "lora_te_llm_adapter_",
+        "text_encoders.",
+        "llm_adapter.",
+        "patch_embed.",
+        "final_layer.",
+        "t_embedder.",
+    )):
+        return 0
 
     for i,n in enumerate(keylist):
         if n in fullkey: return i
@@ -2094,7 +2189,20 @@ def read_model_state_dict(checkpoint_info, device):
         if additional_modules and shared.sd_model is not None and hasattr(shared.sd_model, "forge_objects"):
             sd = {}
             sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.unet.model.diffusion_model, prefix="model.diffusion_model."))
-            sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.clip.cond_stage_model, prefix="text_encoders."))
+            clip_sd = get_state_dict_after_quant(shared.sd_model.forge_objects.clip.cond_stage_model, prefix="text_encoders.")
+            # Forge Anima checkpoints are recognized only when llm_adapter is stored
+            # under model.diffusion_model.llm_adapter.*, not under text_encoders.*.
+            for key in list(clip_sd.keys()):
+                if ".llm_adapter." not in key:
+                    continue
+
+                _, _, suffix = key.partition(".llm_adapter.")
+                if not suffix:
+                    continue
+
+                sd[f"model.diffusion_model.llm_adapter.{suffix}"] = clip_sd.pop(key)
+
+            sd.update(clip_sd)
             sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.vae.first_stage_model, prefix="vae."))
             return sd
         return load_torch_file(checkpoint_info.filename,device=CUDA if "cuda" in device else CPU)

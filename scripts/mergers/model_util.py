@@ -34,7 +34,14 @@ def prune_model(model, isxl=False):
     keys = list(model.keys())
     base_prefix = "conditioner." if isxl else "cond_stage_model."
     for k in keys:
-        if "diffusion_model." not in k and "first_stage_model." not in k and base_prefix not in k:
+        if (
+            "diffusion_model." not in k
+            and "first_stage_model." not in k
+            and base_prefix not in k
+            and not k.startswith("text_encoders.")
+            and not k.startswith("vae.")
+            and not k.startswith("llm_adapter.")
+        ):
             model.pop(k, None)
     return model
 
