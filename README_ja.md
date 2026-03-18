@@ -1,3 +1,7 @@
+# SuperMerger-ForgeNeo-Anima
+- このforkでは ForgeNeo と Anima への対応を追加しています。
+- このforkの変更の大半は Codex に実装してもらったため、挙動や記載内容の正確性について責任を負えません。
+
 # SuperMerger
 - [AUTOMATIC1111's stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) 用のモデルマージ拡張
 - マージしたモデルを保存せず直接生成に使用できます

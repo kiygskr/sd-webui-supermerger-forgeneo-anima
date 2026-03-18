@@ -1,3 +1,7 @@
+# SuperMerger-ForgeNeo-Anima
+- This fork adds support for ForgeNeo and Anima.
+- Most of the changes in this fork were implemented by Codex, so I cannot guarantee the correctness of all behavior or documentation.
+
 # SuperMerger
 - Model merge extention for [AUTOMATIC1111's stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) 
 - Merge models can be loaded directly for generation without saving
