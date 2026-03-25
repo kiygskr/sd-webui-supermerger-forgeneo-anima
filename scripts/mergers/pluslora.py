@@ -1372,13 +1372,17 @@ def plusweights(weight, module, bias = None):
         else:
             orig_dtype = None
         updown = module.calc_updown(weight.to(dtype=torch.float32))
+        module_ratio = getattr(module, "lbw_ratio", 1.0)
         if len(weight.shape) == 4 and weight.shape[1] == 9:
             # inpainting model. zero pad updown to make channel[1]  4 to 9
             updown = torch.nn.functional.pad(updown, (0, 0, 0, 0, 0, 5))
         if type(updown) == tuple:
             updown, ex_bias = updown
+            updown = updown * module_ratio
             if ex_bias is not None and bias is not None:
-                bias += ex_bias
+                bias += ex_bias * module_ratio
+        else:
+            updown = updown * module_ratio
         weight += updown.to(weight.dtype)
     return weight if orig_dtype is None else weight.to(orig_dtype), bias
 
@@ -1396,15 +1400,27 @@ def plusweightsqvk(inweight, outweight, network_layer_name, module ,net,bias = N
                 updown_q = module_q.calc_updown(inweight)
                 updown_k = module_k.calc_updown(inweight)
                 updown_v = module_v.calc_updown(inweight)
+                if type(updown_q) is tuple:
+                    updown_q, _ = updown_q
+                if type(updown_k) is tuple:
+                    updown_k, _ = updown_k
+                if type(updown_v) is tuple:
+                    updown_v, _ = updown_v
+                updown_q = updown_q * getattr(module_q, "lbw_ratio", 1.0)
+                updown_k = updown_k * getattr(module_k, "lbw_ratio", 1.0)
+                updown_v = updown_v * getattr(module_v, "lbw_ratio", 1.0)
                 updown_qkv = torch.vstack([updown_q, updown_k, updown_v])
                 updown_out = module_out.calc_updown(outweight)
                 if type(updown_out) is tuple:
                     updown_out,ex_bias = updown_out
+                    updown_out = updown_out * getattr(module_out, "lbw_ratio", 1.0)
+                    if bias is not None and ex_bias is not None:
+                        bias += ex_bias * getattr(module_out, "lbw_ratio", 1.0)
+                else:
+                    updown_out = updown_out * getattr(module_out, "lbw_ratio", 1.0)
 
                 inweight += updown_qkv
                 outweight += updown_out
-                if bias is not None and ex_bias is not None:
-                    bias += ex_bias
 
     return inweight,outweight,bias
 
@@ -1477,24 +1493,7 @@ def lbw(lora,lwei,isv2,isflux=False):
         if not picked:
             errormodules.append(key)
 
-        ltype = type(lora.modules[key]).__name__
-
-        set = False
-        if ltype in LORAANDSOON.keys():
-            setattr(lora.modules[key],LORAANDSOON[ltype],torch.nn.Parameter(getattr(lora.modules[key],LORAANDSOON[ltype]) * ratio))
-            #print(ltype)
-            set = True
-        else:
-            if hasattr(lora.modules[key],"up_model"):
-                lora.modules[key].up_model.weight= torch.nn.Parameter(lora.modules[key].up_model.weight *ratio)
-                #print("LoRA using LoCON")
-                set = True
-            else:
-                lora.modules[key].up.weight= torch.nn.Parameter(lora.modules[key].up.weight *ratio)
-                #print("LoRA")
-                set = True
-        if not set : 
-            print("unkwon LoRA")
+        lora.modules[key].lbw_ratio = ratio
 
     if errormodules:
         print("unchanged modules in lbw:", errormodules)
@@ -1502,20 +1501,6 @@ def lbw(lora,lwei,isv2,isflux=False):
         print(f"{lora.name}: Successfully set the ratio {lwei} ")
 
     return lora
-
-LORAANDSOON = {
-    "LoraHadaModule" : "w1a",
-    "LycoHadaModule" : "w1a",
-    "NetworkModuleHada": "w1a",
-    "FullModule" : "weight",
-    "NetworkModuleFull": "weight",
-    "IA3Module" : "w",
-    "NetworkModuleIa3" : "w",
-    "LoraKronModule" : "w1",
-    "LycoKronModule" : "w1",
-    "NetworkModuleLokr": "w1",
-    "NetworkModuleNorm": "w_norm",
-}
 
 def save_to_file(file_name, model, state_dict, dtype, metadata):
     if dtype is not None:
