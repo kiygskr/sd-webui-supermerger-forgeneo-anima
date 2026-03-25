@@ -1459,6 +1459,15 @@ def lbw(lora,lwei,isv2,isflux=False):
                 elif key.startswith("layers_") or "model_layers_" in key or ".model.layers." in key:
                     ratio = lwei[0]
                     picked = True
+                elif any(marker in key for marker in (
+                    "diffusion_model.llm_adapter.norm",
+                    "diffusion_model_t_embedding_norm",
+                    "diffusion_model.t_embedding.norm",
+                    "llm_adapter.norm",
+                    "t_embedding_norm",
+                )):
+                    ratio = lwei[0]
+                    picked = True
             for i,block in enumerate(blocks):
                 if block in key:
                     if i == 26 or i == 27: i=0
@@ -1683,6 +1692,7 @@ def blockfromkey(key,keylist,isv2 = False):
         "lora_unet_patch_embed",
         "lora_unet_final_layer",
         "lora_unet_t_embedder",
+        "t_embedding_norm",
         "lora_te_text_encoders_",
         "lora_te_llm_adapter_",
         "text_encoders.",
@@ -1690,6 +1700,7 @@ def blockfromkey(key,keylist,isv2 = False):
         "patch_embed.",
         "final_layer.",
         "t_embedder.",
+        "llm_adapter.norm",
     )):
         return 0
 

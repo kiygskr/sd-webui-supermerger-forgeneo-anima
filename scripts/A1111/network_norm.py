@@ -2,7 +2,7 @@ import scripts.A1111.network as network
 
 class ModuleTypeNorm(network.ModuleType):
     def create_module(self, net: network.Network, weights: network.NetworkWeights):
-        if all(x in weights.w for x in ["w_norm", "b_norm"]):
+        if "w_norm" in weights.w:
             return NetworkModuleNorm(net, weights)
 
         return None

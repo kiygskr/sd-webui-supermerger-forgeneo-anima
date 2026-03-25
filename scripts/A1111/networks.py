@@ -149,6 +149,18 @@ def anima_aliases_from_module_name(network_name):
             aliases.add(llm_dot)
             aliases.add(llm_dot.split("llm_adapter.", 1)[1])
 
+    if "_llm_adapter_" in network_name and not network_name.startswith("llm_adapter_"):
+        llm_name = "llm_adapter_" + network_name.split("_llm_adapter_", 1)[1]
+        aliases.add(llm_name)
+        aliases.add(f"diffusion_model_{llm_name}")
+        aliases.add(f"model_diffusion_model_{llm_name}")
+        llm_dot = anima_dot_name_from_alias(llm_name)
+        if llm_dot:
+            aliases.add(llm_dot)
+            aliases.add(f"diffusion_model.{llm_dot}")
+            aliases.add(f"model.diffusion_model.{llm_dot}")
+            aliases.add(llm_dot.split("llm_adapter.", 1)[1])
+
     if network_name.startswith("model_layers_") or "_model_layers_" in network_name:
         if network_name.startswith("model_layers_"):
             model_layers_name = network_name
@@ -394,7 +406,14 @@ def load_network(name, network_on_disk, isxl, is_sd2):
                 key_network_without_network_parts = key_network
                 network_part = ""
         else:
-            if key_network.endswith(".alpha") or key_network.endswith(".scale") or key_network.endswith(".bias"):
+            network_part_suffixes = {
+                "alpha", "scale", "bias",
+                "w_norm", "b_norm",
+                "lokr_w1", "lokr_w1_a", "lokr_w1_b",
+                "lokr_w2", "lokr_w2_a", "lokr_w2_b",
+                "lokr_t2",
+            }
+            if key_network.rsplit(".", 1)[-1] in network_part_suffixes:
                 key_network_without_network_parts, network_part = key_network.rsplit(".", 1)
             else:
                 network_parts = key_network.rsplit(".", 2)
