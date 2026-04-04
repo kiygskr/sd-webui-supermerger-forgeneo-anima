@@ -1303,6 +1303,12 @@ def oldpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2, keychan
     return theta_0
 
 def newpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2,isflux, keychanger):
+    # SuperMerger stores per-module LBW ratios on the loaded LoRA objects.
+    # Reusing cached objects can leak ratios across merge runs, so force reload.
+    if hasattr(nets, "loaded_networks"):
+        nets.loaded_networks.clear()
+    if hasattr(nets, "networks_in_memory"):
+        nets.networks_in_memory.clear()
     nets.load_networks(names, [1]* len(names),[1]* len(names), None, isxl, isv2)
 
     for l, loaded in enumerate(nets.loaded_networks):
