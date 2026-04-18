@@ -1316,6 +1316,9 @@ def newpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2,isflux, 
             changed = False
             if name == loaded.name:
                 lbw(nets.loaded_networks[l],to26(lweis[n]),isv2,isflux)
+                lora_sd, _, _ = load_state_dict(filenames[n], torch.float, "cpu")
+                sync_module_scales_from_state_dict(nets.loaded_networks[l], lora_sd)
+                del lora_sd
                 changed = True
             if not changed: "ERROR: {name}weight is not changed"
 
@@ -1444,6 +1447,53 @@ def resolve_qkv_group_keys(name, keychanger):
             outkey = next((candidate for candidate in out_candidates if candidate in keychanger), out_candidates[0])
             return inkey, outkey
     return None, None
+
+def strip_network_weight_suffix(key):
+    for suffix in (
+        ".lora_down.weight",
+        ".lora_up.weight",
+        ".lora_mid.weight",
+        ".lora_A.weight",
+        ".lora_B.weight",
+        ".alpha",
+        ".scale",
+        ".bias",
+        ".dora_scale",
+        ".w_norm",
+        ".b_norm",
+        ".oft_blocks",
+        ".oft_diag",
+        ".rescale",
+    ):
+        if key.endswith(suffix):
+            return key[:-len(suffix)]
+    return key
+
+def sync_module_scales_from_state_dict(net, lora_sd):
+    synced = 0
+    for module in net.modules.values():
+        base_key = strip_network_weight_suffix(module.network_key)
+        down_key = None
+        for candidate in (
+            base_key + ".lora_down.weight",
+            base_key + ".lora_A.weight",
+        ):
+            if candidate in lora_sd:
+                down_key = candidate
+                break
+
+        alpha_key = next((candidate for candidate in (base_key + ".alpha", base_key + "_alpha") if candidate in lora_sd), None)
+        scale_key = next((candidate for candidate in (base_key + ".scale", base_key + "_scale") if candidate in lora_sd), None)
+
+        if down_key is not None:
+            module.dim = lora_sd[down_key].shape[0]
+        if alpha_key is not None:
+            module.alpha = float(lora_sd[alpha_key].detach().cpu().item())
+        if scale_key is not None:
+            module.scale = float(lora_sd[scale_key].detach().cpu().item())
+        synced += 1
+
+    print(f"{net.name}: synchronized alpha/dim metadata for {synced} modules")
 
 def lbw(lora,lwei,isv2,isflux=False):
     errormodules = []
@@ -2184,24 +2234,34 @@ def get_flux_blocks(key):
 
 def read_model_state_dict(checkpoint_info, device):
     if forge:
-        from backend.utils import get_state_dict_after_quant, load_torch_file
+        from backend.loader import preprocess_state_dict, replace_state_dict
+        from backend.state_dict import convert_quantization
+        from backend.utils import load_torch_file
+        import huggingface_guess
         from modules.sd_models import model_data
-        load_model(checkpoint_info)
-        additional_modules = model_data.forge_loading_parameters.get("additional_modules", [])
-        if additional_modules and shared.sd_model is not None and hasattr(shared.sd_model, "forge_objects"):
-            sd = {}
-            sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.unet.model.diffusion_model, prefix="model.diffusion_model."))
-            clip_sd = get_state_dict_after_quant(shared.sd_model.forge_objects.clip.cond_stage_model, prefix="text_encoders.")
-            # Forge Anima checkpoints are recognized only when llm_adapter is stored
-            # under model.diffusion_model.llm_adapter.*, not under text_encoders.*.
-            llm_adapter_keys = [key for key in clip_sd.keys() if ".llm_adapter." in key]
-            for key in llm_adapter_keys:
-                _, _, suffix = key.partition(".llm_adapter.")
-                if suffix:
-                    sd[f"model.diffusion_model.llm_adapter.{suffix}"] = clip_sd.pop(key)
-            sd.update(clip_sd)
-            sd.update(get_state_dict_after_quant(shared.sd_model.forge_objects.vae.first_stage_model, prefix="vae."))
-            return sd
+        additional_modules = []
+        if hasattr(model_data, "forge_loading_parameters"):
+            additional_modules = model_data.forge_loading_parameters.get("additional_modules", [])
+        sd, metadata = load_torch_file(checkpoint_info.filename, return_metadata=True)
+        sd, metadata = convert_quantization(sd, metadata)
+        sd = preprocess_state_dict(sd)
+
+        if additional_modules:
+            guess = huggingface_guess.guess(sd)
+            for additional_path in additional_modules:
+                asd, asd_meta = load_torch_file(additional_path, return_metadata=True)
+                asd, _ = convert_quantization(asd, asd_meta)
+                sd = replace_state_dict(sd, asd, guess, additional_path)
+
+        # Forge Anima checkpoints are recognized only when llm_adapter is stored
+        # under model.diffusion_model.llm_adapter.*, not under text_encoders.*.
+        llm_adapter_keys = [key for key in sd.keys() if ".llm_adapter." in key and key.startswith("text_encoders.")]
+        for key in llm_adapter_keys:
+            _, _, suffix = key.partition(".llm_adapter.")
+            if suffix:
+                sd[f"model.diffusion_model.llm_adapter.{suffix}"] = sd.pop(key)
+
+        return sd
         return load_torch_file(checkpoint_info.filename,device=CUDA if "cuda" in device else CPU)
     if hasattr(sd_models, "read_state_dict"):
         try:
