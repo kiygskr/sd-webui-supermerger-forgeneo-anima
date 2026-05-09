@@ -548,13 +548,14 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
 
             if MODES[1] in mode:#Add
                 caster(f"{num}, {block}, {model_a}+{current_alpha}+*({model_b}-{model_c}),{key}",hear)
+                promote = use32 or tensors_need_promotion(theta_0_a, theta_1[key])
                 if uselerp:
-                    if use32:
-                        theta_0_a = torch.lerp(theta_0_a,theta_0_a.to(torch.float32) + current_alpha * theta_1[key].to(torch.float32),1.0).to(theta_0_a.dtype)
+                    if promote:
+                        theta_0_a = torch.lerp(theta_0_a.to(torch.float32), theta_0_a.to(torch.float32) + current_alpha * theta_1[key].to(torch.float32), 1.0).to(theta_0_a.dtype)
                     else:
                         theta_0_a = torch.lerp(theta_0_a,theta_0_a + current_alpha * theta_1[key],1.0)
                 else:
-                    if use32:
+                    if promote:
                         theta_0_a = (theta_0_a.to(torch.float32) + current_alpha * theta_1[key].to(torch.float32)).to(theta_0_a.dtype)
                     else:
                         theta_0_a = (theta_0_a + current_alpha * theta_1[key])
@@ -562,18 +563,23 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
             elif MODES[2] in mode:#Triple
                 caster(f"{num}, {block}, {model_a}+{1-current_alpha-current_beta}+{model_b}*{current_alpha}+ {model_c}*{current_beta}",hear)
                 #
+                promote = use32 or tensors_need_promotion(theta_0_a, theta_1[key], theta_2[key])
                 if uselerp and current_alpha + current_beta != 0:
-                    if use32:
+                    if promote:
                         theta_0_a =lerp(theta_0_a.to(torch.float32),lerp(theta_1[key].to(torch.float32),theta_2[key].to(torch.float32),current_beta/(current_alpha + current_beta)),current_alpha + current_beta).to(theta_0_a.dtype)
                     else:
                         theta_0_a =lerp(theta_0_a,lerp(theta_1[key],theta_2[key],current_beta/(current_alpha + current_beta)),current_alpha + current_beta)
                 else:
-                    theta_0_a = (1 - current_alpha-current_beta) * theta_0_a + current_alpha * theta_1[key]+current_beta * theta_2[key] 
+                    if promote:
+                        theta_0_a = ((1 - current_alpha - current_beta) * theta_0_a.to(torch.float32) + current_alpha * theta_1[key].to(torch.float32) + current_beta * theta_2[key].to(torch.float32)).to(theta_0_a.dtype)
+                    else:
+                        theta_0_a = (1 - current_alpha-current_beta) * theta_0_a + current_alpha * theta_1[key]+current_beta * theta_2[key] 
 
             elif MODES[3] in mode:#Twice
                 caster(f"{num}, {block}, {key},{model_a} +  {1-current_alpha} + {model_b}*{current_alpha}",hear)
                 caster(f"{num}, {block}, {key}({model_a}+{model_b}) +{1-current_beta}+{model_c}*{current_beta}",hear)
-                if uselerp:
+                promote = use32 or tensors_need_promotion(theta_0_a, theta_1[key], theta_2[key])
+                if uselerp or promote:
                     theta_0_a = torch.lerp(torch.lerp(theta_0_a.to(torch.float32), theta_1[key].to(torch.float32), current_alpha), theta_2[key].to(torch.float32), current_beta).to(theta_0_a.dtype)
                 else:
                     theta_0_a = (1 - current_alpha) * theta_0_a + current_alpha * theta_1[key]
@@ -582,10 +588,11 @@ def smerge(weights_a,weights_b,model_a,model_b,model_c,base_alpha,base_beta,mode
             else:#Weight
                 if current_alpha == 1:
                     caster(f"{num}, {block}, {key} alpha = 1,{model_a}={model_b}",hear)
-                    theta_0_a = theta_1[key]
+                    theta_0_a = theta_1[key].to(theta_0_a.dtype) if hasattr(theta_0_a, "dtype") else theta_1[key]
                 elif current_alpha !=0:
                     caster(f"{num}, {block}, {key}, {model_a}*{1-current_alpha}+{model_b}*{current_alpha}",hear)
-                    if uselerp:
+                    promote = use32 or tensors_need_promotion(theta_0_a, theta_1[key])
+                    if uselerp or promote:
                         theta_0_a = torch.lerp(theta_0_a.to(torch.float32), theta_1[key].to(torch.float32), current_alpha).to(theta_0_a.dtype)
                     else:
                         theta_0_a = (1 - current_alpha) * theta_0_a + current_alpha * theta_1[key]
@@ -2041,6 +2048,10 @@ def qdtyper(sd):
     for key in sd:
         if hasattr(sd[key],"dtype"):
             return sd[key].dtype
+
+def tensors_need_promotion(*tensors):
+    dtypes = {tensor.dtype for tensor in tensors if isinstance(tensor, torch.Tensor)}
+    return len(dtypes) > 1
 
 def to_qdtype(sd_1, sd_2, qd_1, qd_2, device, m1, m2):
     if qd_1 in QTYPES and qd_2 in QTYPES:
