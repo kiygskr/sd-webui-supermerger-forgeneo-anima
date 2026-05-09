@@ -40,7 +40,7 @@ class NetworkModuleLora(network.NetworkModule):
         if weight is None and none_ok:
             return None
         
-        is_linear = "Linear" in str(type(self.sd_module)) if forge else type(self.sd_module) in [torch.nn.Linear, torch.nn.modules.linear.NonDynamicallyQuantizableLinear, torch.nn.MultiheadAttention, QkvLinear]
+        is_linear = "Linear" in str(type(self.sd_module)) or "Embedding" in str(type(self.sd_module)) if forge else type(self.sd_module) in [torch.nn.Linear, torch.nn.modules.linear.NonDynamicallyQuantizableLinear, torch.nn.MultiheadAttention, QkvLinear, torch.nn.Embedding]
         is_conv = "Conv2d" in str(type(self.sd_module)) if forge else type(self.sd_module) in [torch.nn.Conv2d]
 
         if is_linear:

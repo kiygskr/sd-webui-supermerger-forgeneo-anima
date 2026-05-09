@@ -144,7 +144,14 @@ def is_anima_checkpoint_key(key):
     )
 
 def register_key_alias(keychanger, alias, original_key):
-    if alias and alias not in keychanger:
+    if not alias:
+        return
+    existing = keychanger.get(alias)
+    if existing is None:
+        keychanger[alias] = original_key
+        return
+    # Prefer weight tensors when multiple checkpoint tensors share the same alias.
+    if existing.endswith(".bias") and original_key.endswith(".weight"):
         keychanger[alias] = original_key
 
 def suffix_after_prefix(value, prefix):
@@ -157,6 +164,28 @@ def strip_tensor_suffix(key):
         if key.endswith(suffix):
             return key[:-len(suffix)]
     return key
+
+def anima_mlp_alias_variants(value):
+    variants = {value}
+    replacements = (
+        (".mlp.0.", ".mlp.layer1."),
+        (".mlp.2.", ".mlp.layer2."),
+        ("_mlp_0_", "_mlp_layer1_"),
+        ("_mlp_2_", "_mlp_layer2_"),
+    )
+    changed = True
+    while changed:
+        changed = False
+        current = list(variants)
+        for item in current:
+            for source, target in replacements:
+                if source in item and item.replace(source, target) not in variants:
+                    variants.add(item.replace(source, target))
+                    changed = True
+                if target in item and item.replace(target, source) not in variants:
+                    variants.add(item.replace(target, source))
+                    changed = True
+    return variants
 
 def _anima_join_tokens(tokens):
     parts = []
@@ -218,6 +247,8 @@ def anima_key_aliases_from_checkpoint_key(key):
     normalized = base_key.replace(".", "_")
     aliases.add(base_key)
     aliases.add(normalized)
+    aliases.update(anima_mlp_alias_variants(base_key))
+    aliases.update(anima_mlp_alias_variants(normalized))
 
     if normalized.startswith("model_diffusion_model_"):
         suffix = normalized.split("model_diffusion_model_", 1)[1]
@@ -384,12 +415,29 @@ def candidate_checkpoint_module_keys(msd_key):
         add(f"model_layers_{suffix.replace('.', '_')}")
         add(f"layers_{suffix.replace('.', '_')}")
         add(f"model.layers.{suffix}")
-    return candidates
+    expanded = []
+    for candidate in candidates:
+        for variant in anima_mlp_alias_variants(candidate):
+            if variant not in expanded:
+                expanded.append(variant)
+    return expanded
 
-def resolve_checkpoint_weight_key(msd_key, keychanger):
+def resolve_checkpoint_weight_key(msd_key, keychanger, state_dict=None, expected_shape=None):
+    fallback = None
     for candidate in candidate_checkpoint_module_keys(msd_key):
-        if candidate in keychanger:
-            return keychanger[candidate], candidate
+        if candidate not in keychanger:
+            continue
+        resolved_key = keychanger[candidate]
+        if fallback is None:
+            fallback = (resolved_key, candidate)
+        if state_dict is not None and expected_shape is not None:
+            tensor = state_dict.get(resolved_key)
+            if tensor is not None and tuple(tensor.shape) == tuple(expected_shape):
+                return resolved_key, candidate
+        else:
+            return resolved_key, candidate
+    if fallback is not None:
+        return fallback
     return None, msd_key
 
 def f_changediffusers(version):
@@ -1337,7 +1385,7 @@ def newpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2,isflux, 
 
             qvk = ["_q_proj","_k_proj","_v_proj","_out_proj",".q_proj",".k_proj",".v_proj",".out_proj",".output_proj"]
 
-            wkey, matched_key = resolve_checkpoint_weight_key(msd_key, keychanger)
+            wkey, matched_key = resolve_checkpoint_weight_key(msd_key, keychanger, theta_0, module.shape)
             if wkey is not None:
                 bkey = wkey.replace("weight","bias")
                 if bkey in theta_0.keys():
@@ -1355,8 +1403,8 @@ def newpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2,isflux, 
                         else:
                             theta_0[keychanger[inkey]] ,theta_0[keychanger[outkey]], _= plusweightsqvk(theta_0[keychanger[inkey]],theta_0[keychanger[outkey]], name ,module, net)
                     else:
-                        resolved_inkey, _ = resolve_checkpoint_weight_key(inkey, keychanger) if inkey else (None, None)
-                        resolved_outkey, _ = resolve_checkpoint_weight_key(outkey, keychanger) if outkey else (None, None)
+                        resolved_inkey, _ = resolve_checkpoint_weight_key(inkey, keychanger, theta_0) if inkey else (None, None)
+                        resolved_outkey, _ = resolve_checkpoint_weight_key(outkey, keychanger, theta_0) if outkey else (None, None)
                         if resolved_inkey is not None and resolved_outkey is not None:
                             bkey = resolved_outkey.replace("weight","bias")
                             if bkey in theta_0.keys():
@@ -1392,6 +1440,14 @@ def plusweights(weight, module, bias = None):
                 bias += ex_bias * module_ratio
         else:
             updown = updown * module_ratio
+        if tuple(weight.shape) != tuple(updown.shape):
+            raise RuntimeError(
+                f"Shape mismatch while applying LoRA: "
+                f"sd_key={getattr(module, 'sd_key', '?')} "
+                f"network_key={getattr(module, 'network_key', '?')} "
+                f"weight_shape={tuple(weight.shape)} "
+                f"updown_shape={tuple(updown.shape)}"
+            )
         weight += updown.to(weight.dtype)
     return weight if orig_dtype is None else weight.to(orig_dtype), bias
 

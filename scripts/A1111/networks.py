@@ -63,9 +63,15 @@ ANIMA_KEY_MARKERS = (
     "lora_unet_patch_embed",
     "lora_unet_final_layer",
     "lora_unet_t_embedder",
+    "lora_te1_layers_",
     "lora_te_text_encoders_",
     "lora_te_llm_adapter_",
 )
+ANIMA_QWEN_ALIAS_TO_DOT = {
+    "text_encoders_qwen25_7b_": "text_encoders.qwen25_7b.",
+    "text_encoders_qwen3_06b_transformer_": "text_encoders.qwen3_06b.transformer.",
+    "text_encoders_qwen3_transformer_": "text_encoders.qwen3.transformer.",
+}
 
 def is_anima_lora_key(key):
     return any(marker in key for marker in ANIMA_KEY_MARKERS)
@@ -73,6 +79,28 @@ def is_anima_lora_key(key):
 def register_network_alias(mapping, alias, module):
     if alias and alias not in mapping:
         mapping[alias] = module
+
+def anima_mlp_alias_variants(value):
+    variants = {value}
+    replacements = (
+        (".mlp.0.", ".mlp.layer1."),
+        (".mlp.2.", ".mlp.layer2."),
+        ("_mlp_0_", "_mlp_layer1_"),
+        ("_mlp_2_", "_mlp_layer2_"),
+    )
+    changed = True
+    while changed:
+        changed = False
+        current = list(variants)
+        for item in current:
+            for source, target in replacements:
+                if source in item and item.replace(source, target) not in variants:
+                    variants.add(item.replace(source, target))
+                    changed = True
+                if target in item and item.replace(target, source) not in variants:
+                    variants.add(item.replace(target, source))
+                    changed = True
+    return variants
 
 def _anima_join_tokens(tokens):
     parts = []
@@ -113,6 +141,11 @@ def anima_dot_name_from_alias(alias):
         suffix = alias[len("llm_adapter_"):]
         tokens = _anima_join_tokens(suffix.split("_"))
         return "llm_adapter." + ".".join(tokens)
+    for prefix, dot_prefix in ANIMA_QWEN_ALIAS_TO_DOT.items():
+        if alias.startswith(prefix):
+            suffix = alias[len(prefix):]
+            tokens = _anima_join_tokens(suffix.split("_"))
+            return dot_prefix + ".".join(tokens)
     if alias.startswith("text_encoders_"):
         suffix = alias[len("text_encoders_"):]
         tokens = _anima_join_tokens(suffix.split("_"))
@@ -124,6 +157,9 @@ def anima_aliases_from_module_name(network_name):
     dot_name = anima_dot_name_from_alias(network_name)
     if dot_name:
         aliases.add(dot_name)
+    aliases.update(anima_mlp_alias_variants(network_name))
+    if dot_name:
+        aliases.update(anima_mlp_alias_variants(dot_name))
 
     if network_name.startswith("model_diffusion_model_"):
         suffix = network_name.split("model_diffusion_model_", 1)[1]
@@ -210,8 +246,24 @@ def find_anima_module(mapping, key):
         candidates.append(key.split("text_encoders_", 1)[1])
     elif key.startswith("llm_adapter_"):
         candidates.append(key.split("llm_adapter_", 1)[1])
+    elif ".model.layers." in key:
+        suffix = key.split(".model.layers.", 1)[1]
+        candidates.append(f"model.layers.{suffix}")
+        candidates.append(f"layers.{suffix}")
+        candidates.append(f"model_layers_{suffix.replace('.', '_')}")
+        candidates.append(f"layers_{suffix.replace('.', '_')}")
+    elif key.startswith("text_encoders.") and ".transformer.model.layers." in key:
+        suffix = key.split(".transformer.model.layers.", 1)[1]
+        candidates.append(f"model.layers.{suffix}")
+        candidates.append(f"layers.{suffix}")
+        candidates.append(f"model_layers_{suffix.replace('.', '_')}")
+        candidates.append(f"layers_{suffix.replace('.', '_')}")
 
     for candidate in candidates:
+        for variant in anima_mlp_alias_variants(candidate):
+            module = mapping.get(variant)
+            if module is not None:
+                return module, variant
         module = mapping.get(candidate)
         if module is not None:
             return module, candidate
@@ -284,6 +336,9 @@ def convert_diffusers_name_to_compvis(key, is_sd2):
 
     if match(m, r"lora_te1_text_model_encoder_layers_(\d+)_(.+)"):
         return f"clip_l_transformer_text_model_encoder_layers_{m[0]}_{m[1]}"
+
+    if match(m, r"lora_te1_layers_(\d+)_(.+)"):
+        return f"layers_{m[0]}_{m[1]}"
 
     if match(m, r"lora_te3_text_model_encoder_layers_(\d+)_(.+)"):
         if 'mlp_fc1' in m[1]:
@@ -407,7 +462,7 @@ def load_network(name, network_on_disk, isxl, is_sd2):
                 network_part = ""
         else:
             network_part_suffixes = {
-                "alpha", "scale", "bias",
+                "alpha", "scale", "bias", "diff", "diff_b",
                 "w_norm", "b_norm",
                 "lokr_w1", "lokr_w1_a", "lokr_w1_b",
                 "lokr_w2", "lokr_w2_a", "lokr_w2_b",
