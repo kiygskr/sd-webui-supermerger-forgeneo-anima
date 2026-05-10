@@ -32,6 +32,9 @@ pchanged = False
 CUDA = torch.device("cuda:0")
 CPU = torch.device("cpu")
 
+def sorted_checkpoint_tiles():
+    return sorted(sd_models.checkpoint_tiles(), key=lambda name: name.casefold())
+
 BLOCKID26=["BASE","IN00","IN01","IN02","IN03","IN04","IN05","IN06","IN07","IN08","IN09","IN10","IN11","M00","OUT00","OUT01","OUT02","OUT03","OUT04","OUT05","OUT06","OUT07","OUT08","OUT09","OUT10","OUT11"]
 BLOCKID17=["BASE","IN01","IN02","IN04","IN05","IN07","IN08","M00","OUT03","OUT04","OUT05","OUT06","OUT07","OUT08","OUT09","OUT10","OUT11"]
 BLOCKID12=["BASE","IN04","IN05","IN07","IN08","M00","OUT00","OUT01","OUT02","OUT03","OUT04","OUT05"]
@@ -497,11 +500,11 @@ def on_ui_tabs():
                 sml_makelora = gr.Button(elem_id="model_merger_merge", value="Make LoRA (alpha * Model A - beta * Model B)",variant='primary')
                 sml_extract = gr.Button(elem_id="model_merger_merge", value="Extract from two LoRAs",variant='primary')
                 with gr.Row(equal_height=False):
-                    sml_model_a = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="Model A",interactive=True)
-                    create_refresh_button(sml_model_a, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z")
+                    sml_model_a = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="Model A",interactive=True)
+                    create_refresh_button(sml_model_a, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z")
                 with gr.Row(equal_height=False):
-                    sml_model_b = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="Model B",interactive=True)
-                    create_refresh_button(sml_model_b, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z")
+                    sml_model_b = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="Model B",interactive=True)
+                    create_refresh_button(sml_model_b, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z")
                 with gr.Row(equal_height=False):
                     alpha = gr.Slider(label="alpha", minimum=-1.0, maximum=2, step=0.001, value=1)
                     beta = gr.Slider(label="beta", minimum=-1.0, maximum=2, step=0.001, value=1)

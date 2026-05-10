@@ -41,6 +41,9 @@ xyzpath = os.path.join(path_root,"xyzpresets.json")
 
 CALCMODES  = ["normal", "cosineA", "cosineB","trainDifference","smoothAdd","smoothAdd MT","extract","tensor","tensor2","self","plus random"]
 
+def sorted_checkpoint_tiles():
+    return sorted(sd_models.checkpoint_tiles(), key=lambda name: name.casefold())
+
 try:
     from backend.utils import load_torch_file
     forge = True
@@ -96,14 +99,14 @@ def on_ui_tabs():
                         mclearcache= gr.Button(value="Clear Cache",elem_classes=["compact_button"],variant='primary')
 
                     with gr.Row(variant="compact"):
-                        model_a = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="Model A",interactive=True)
-                        create_refresh_button(model_a, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z")
+                        model_a = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="Model A",interactive=True)
+                        create_refresh_button(model_a, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z")
 
-                        model_b = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="Model B",interactive=True)
-                        create_refresh_button(model_b, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z")
+                        model_b = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="Model B",interactive=True)
+                        create_refresh_button(model_b, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z")
 
-                        model_c = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="Model C",interactive=True)
-                        create_refresh_button(model_c, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z")
+                        model_c = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="Model C",interactive=True)
+                        create_refresh_button(model_c, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z")
 
                     mode = gr.Radio(label = "Merge Mode",choices = ["Weight sum", "Add difference", "Triple sum", "sum Twice"], value="Weight sum", info="A*(1-alpha)+B*alpha")
                     calcmode = gr.Radio(label = "Calculation Mode",choices = CALCMODES, value = "normal") 
@@ -292,7 +295,7 @@ def on_ui_tabs():
                             calcmodes = gr.CheckboxGroup(label = "calcmode",choices=CALCMODES,type="value",interactive=True)
                         with gr.Row(visible = False) as row_checkpoints:
                             checkpoints = gr.CheckboxGroup(label = "checkpoints",choices=[x.model_name for x in sd_models.checkpoints_list.values()],type="value",interactive=True)
-                            create_refresh_button(checkpoints, sd_models.list_models, lambda: {"choices": [x.model_name for x in sd_models.checkpoints_list.values()]}, "refresh_checkpoint_xyz")
+                            create_refresh_button(checkpoints, sd_models.list_models, lambda: {"choices": sorted([x.model_name for x in sd_models.checkpoints_list.values()], key=lambda name: name.casefold())}, "refresh_checkpoint_xyz")
                         with gr.Row(visible = False) as row_blocks:
                             gr.HTML(value="<p>BASE,IN00,IN01,IN02,IN03,IN04,IN05,IN06,IN07,IN08,IN09,IN10,IN11<br>,M00,OUT00,OUT01,OUT02,OUT03,OUT04,OUT05,OUT06,OUT07,OUT08,OUT09,OUT10,OUT11,Adjust,VAE,print</p>")
 
@@ -439,10 +442,10 @@ def on_ui_tabs():
         with gr.Tab("Analysis", elem_id="tab_analysis"):
             with gr.Tab("Models"):
                 with gr.Row():
-                    an_model_a = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="Checkpoint A",interactive=True)
-                    create_refresh_button(an_model_a, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z") 
-                    an_model_b = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="Checkpoint B",interactive=True)
-                    create_refresh_button(an_model_b, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z") 
+                    an_model_a = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="Checkpoint A",interactive=True)
+                    create_refresh_button(an_model_a, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z") 
+                    an_model_b = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="Checkpoint B",interactive=True)
+                    create_refresh_button(an_model_b, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z") 
                 with gr.Row():
                     an_mode  = gr.Radio(label = "Analysis Mode",choices = ["ASimilarity","Block","Element","Both"], value = "ASimilarity",type  = "value") 
                     an_calc  = gr.Radio(label = "Block method",choices = ["Mean","Min","attn2"], value = "Mean",type  = "value") 
@@ -484,8 +487,8 @@ def on_ui_tabs():
 
         with gr.Tab("Elements", elem_id="tab_deep"):
                 with gr.Row():
-                    smd_model_a = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="Checkpoint",interactive=True)
-                    create_refresh_button(smd_model_a, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z")    
+                    smd_model_a = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="Checkpoint",interactive=True)
+                    create_refresh_button(smd_model_a, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z")    
                     smd_loadkeys = gr.Button(value="load keys",variant='primary')
                 with gr.Row():
                     smd_lora = gr.Dropdown(list(lora.available_loras.keys()),elem_id="model_converter_model_name",label="LoRA",interactive=True)
@@ -497,8 +500,8 @@ def on_ui_tabs():
 
         with gr.Tab("Metadata", elem_id="tab_metadata"):
                 with gr.Row():
-                    meta_model_a = gr.Dropdown(sd_models.checkpoint_tiles(),elem_id="model_converter_model_name",label="read metadata",interactive=True)
-                    create_refresh_button(meta_model_a, sd_models.list_models,lambda: {"choices": sd_models.checkpoint_tiles()},"refresh_checkpoint_Z")    
+                    meta_model_a = gr.Dropdown(sorted_checkpoint_tiles(),elem_id="model_converter_model_name",label="read metadata",interactive=True)
+                    create_refresh_button(meta_model_a, sd_models.list_models,lambda: {"choices": sorted_checkpoint_tiles()},"refresh_checkpoint_Z")    
                     smd_loadmetadata = gr.Button(value="load keys",variant='primary')
                 with gr.Row():
                     metadata = gr.TextArea()
