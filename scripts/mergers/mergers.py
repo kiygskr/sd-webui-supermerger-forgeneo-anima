@@ -65,6 +65,7 @@ if forge or neo:
 revert_target = ""
 orig_cache = 0
 modelcache = collections.OrderedDict()
+merged_state_dict_override = None
 
 from inspect import currentframe
 
@@ -1466,8 +1467,9 @@ def simggen(s_prompt,s_nprompt,s_steps,s_sampler,s_cfg,s_seed,s_w,s_h,s_batch_si
 
         sd_models.reload_model_weights = orig_reload_model_weights
     elif neo:
-        with patch.object(processing.sd_models, 'forge_model_reload', reload_model_weights), patch.object(processing, 'forge_model_reload', reload_model_weights):
-            processed: Processed = processing.process_images(p)
+        memory_management.unload_all_models()
+        memory_management.soft_empty_cache()
+        processed: Processed = processing.process_images(p)
     else:
         processed:Processed = processing.process_images(p)
 
@@ -1797,27 +1799,32 @@ def casterr(*args,hear=hear):
 ################################################
 ##### model_loader
 def model_loader(checkpoint_info, state_dict,metadata, currentmodel): 
+    global merged_state_dict_override
     if ui_version >= 150: checkpoint_info = fake_checkpoint_info(checkpoint_info,metadata,currentmodel)
 
     if neo:
+        merged_state_dict_override = state_dict
         sd_models.model_data.__init__()
         if hasattr(sd_models.model_data, "forge_loading_parameters"):
             sd_models.model_data.forge_loading_parameters = dict(
                 checkpoint_info=checkpoint_info,
                 additional_modules=shared.opts.forge_additional_modules,
                 unet_storage_dtype=fsd.dynamic_args.get('forge_unet_storage_dtype', None) if 'fsd' in globals() else None,
+                state_dict_override_id=id(state_dict),
             )
         load_forge_model(state_dict,checkpoint_info)
     elif not forge:
         sd_models.model_data.__init__()
         sd_models.load_model(checkpoint_info, already_loaded_state_dict=state_dict)
     else:
+        merged_state_dict_override = state_dict
         from modules_forge.main_entry import forge_unet_storage_dtype_options
         unet_storage_dtype, _ = forge_unet_storage_dtype_options.get(shared.opts.forge_unet_storage_dtype, (None, False))
         fsd.model_data.forge_loading_parameters = dict(
             checkpoint_info=checkpoint_info,
             additional_modules=shared.opts.forge_additional_modules,
             unet_storage_dtype=unet_storage_dtype,
+            state_dict_override_id=id(state_dict),
         )
         memory_management.free_memory(1e30,torch.device("cpu"))
         load_forge_model(state_dict,checkpoint_info)
@@ -1847,10 +1854,16 @@ if forge or neo:
     import huggingface_guess
     from modules_forge.main_entry import refresh_model_loading_parameters
 
+def forge_params_hash(params):
+    return str(params)
+
+def forge_params_for_log(params):
+    return params
+
 @torch.inference_mode()
 def load_forge_model(state_dict,checkpoint_info = None):
-    current_hash = str(fsd.model_data.forge_loading_parameters)
-    print('Loading Model: ' + str(fsd.model_data.forge_loading_parameters))
+    current_hash = forge_params_hash(fsd.model_data.forge_loading_parameters)
+    print('Loading Model: ' + str(forge_params_for_log(fsd.model_data.forge_loading_parameters)))
 
     timer = Timer()
 
@@ -1895,28 +1908,30 @@ def load_forge_model(state_dict,checkpoint_info = None):
 
     fsd.model_data.forge_hash = current_hash
 
+    state_dict_override_id = fsd.model_data.forge_loading_parameters.get("state_dict_override_id")
     fsd.model_data.forge_loading_parameters = dict(
         checkpoint_info=checkpoint_info,
         additional_modules=shared.opts.forge_additional_modules,
         unet_storage_dtype=fsd.dynamic_args['forge_unet_storage_dtype']
     )
+    if state_dict_override_id is not None:
+        fsd.model_data.forge_loading_parameters["state_dict_override_id"] = state_dict_override_id
 
 def merged_forge_model_reload():
     params = fsd.model_data.forge_loading_parameters
-    current_hash = str(params)
+    current_hash = forge_params_hash(params)
 
     if fsd.model_data.forge_hash == current_hash:
         return fsd.model_data.sd_model, False
 
-    state_dict_override = params.get("state_dict_override")
-    if state_dict_override is None:
+    if params.get("state_dict_override_id") is None or merged_state_dict_override is None:
         return orig_forge_model_reload()
 
     checkpoint_info = params.get("checkpoint_info")
     if checkpoint_info is None:
         raise ValueError("Failed to find available model...")
 
-    load_forge_model(state_dict_override, checkpoint_info)
+    load_forge_model(merged_state_dict_override, checkpoint_info)
     return fsd.model_data.sd_model, True
 
 
