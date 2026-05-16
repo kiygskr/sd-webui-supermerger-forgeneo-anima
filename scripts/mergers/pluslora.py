@@ -184,6 +184,14 @@ def to61s(ratioss):
 def is_anima_lora_key(key):
     return any(marker in key for marker in ANIMA_KEY_MARKERS)
 
+def is_lycoris_state_dict(state_dict):
+    lyco_suffixes = (
+        ".hada_w1_a", ".hada_w1_b", ".hada_w2_a", ".hada_w2_b", ".hada_t1", ".hada_t2",
+        ".lokr_w1", ".lokr_w1_a", ".lokr_w1_b", ".lokr_w2", ".lokr_w2_a", ".lokr_w2_b", ".lokr_t2",
+        ".oft_blocks", ".oft_diag", ".w_norm", ".b_norm",
+    )
+    return any(key.endswith(lyco_suffixes) for key in state_dict.keys())
+
 def is_anima_checkpoint_key(key):
     return (
         key.startswith("model.diffusion_model.blocks.")
@@ -1212,6 +1220,7 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
         ldict[l.split(":")[0].strip()]=l.split(":")[1]
 
     names, filenames, lweis = [], [], []
+    lycoris_flags = []
 
     for n in lnames:
         c_lora = lora.available_loras.get(n[0], lora.available_lora_aliases.get(n[0],None))
@@ -1241,6 +1250,10 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
         names.append(n[0])
         filenames.append(c_lora.filename)
         lweis.append(ratio)
+        try:
+            lycoris_flags.append(is_lycoris_state_dict(load_state_header(c_lora.filename, torch.float)))
+        except Exception:
+            lycoris_flags.append(False)
 
     modeln=filenamecutter(model,True)   
     dname = modeln
@@ -1301,7 +1314,8 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
 
     lowvramdealer() #web-uiのバグ対策
 
-    if is15:
+    use_network_loader = is15 or any(lycoris_flags)
+    if use_network_loader:
         if shared.sd_model is not None:
             orig_checkpoint = shared.sd_model.sd_checkpoint_info if hasattr(shared.sd_model, "sd_checkpoint_info") else None
         else:
@@ -1330,6 +1344,9 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
             reload_model_compat(orig_checkpoint)
     else:
         theta_0 = oldpluslora(theta_0,filenames,lweis,names, calc_precision,isxl,isv2, keychanger, device)
+
+    if any(lycoris_flags):
+        validate_merged_checkpoint_state_dict(theta_0)
 
     #usemodelgen(theta_0,model)
     settings.append(save_precision)
@@ -1499,6 +1516,7 @@ def plusweights(weight, module, bias = None):
                 bias += ex_bias * module_ratio
         else:
             updown = updown * module_ratio
+        validate_tensor_is_finite(updown, getattr(module, "network_key", "?"))
         if tuple(weight.shape) != tuple(updown.shape):
             raise RuntimeError(
                 f"Shape mismatch while applying LoRA: "
@@ -1521,9 +1539,11 @@ def plusweightsqvk(inweight, outweight, network_layer_name, module ,net,bias = N
 
         if module_q and module_k and module_v and module_out:
             with torch.no_grad():
-                updown_q = module_q.calc_updown(inweight)
-                updown_k = module_k.calc_updown(inweight)
-                updown_v = module_v.calc_updown(inweight)
+                calc_inweight = inweight.to(dtype=torch.float32)
+                calc_outweight = outweight.to(dtype=torch.float32)
+                updown_q = module_q.calc_updown(calc_inweight)
+                updown_k = module_k.calc_updown(calc_inweight)
+                updown_v = module_v.calc_updown(calc_inweight)
                 if type(updown_q) is tuple:
                     updown_q, _ = updown_q
                 if type(updown_k) is tuple:
@@ -1533,8 +1553,11 @@ def plusweightsqvk(inweight, outweight, network_layer_name, module ,net,bias = N
                 updown_q = updown_q * getattr(module_q, "lbw_ratio", 1.0)
                 updown_k = updown_k * getattr(module_k, "lbw_ratio", 1.0)
                 updown_v = updown_v * getattr(module_v, "lbw_ratio", 1.0)
+                validate_tensor_is_finite(updown_q, getattr(module_q, "network_key", "?"))
+                validate_tensor_is_finite(updown_k, getattr(module_k, "network_key", "?"))
+                validate_tensor_is_finite(updown_v, getattr(module_v, "network_key", "?"))
                 updown_qkv = torch.vstack([updown_q, updown_k, updown_v])
-                updown_out = module_out.calc_updown(outweight)
+                updown_out = module_out.calc_updown(calc_outweight)
                 if type(updown_out) is tuple:
                     updown_out,ex_bias = updown_out
                     updown_out = updown_out * getattr(module_out, "lbw_ratio", 1.0)
@@ -1542,9 +1565,10 @@ def plusweightsqvk(inweight, outweight, network_layer_name, module ,net,bias = N
                         bias += ex_bias * getattr(module_out, "lbw_ratio", 1.0)
                 else:
                     updown_out = updown_out * getattr(module_out, "lbw_ratio", 1.0)
+                validate_tensor_is_finite(updown_out, getattr(module_out, "network_key", "?"))
 
-                inweight += updown_qkv
-                outweight += updown_out
+                inweight += updown_qkv.to(inweight.dtype)
+                outweight += updown_out.to(outweight.dtype)
 
     return inweight,outweight,bias
 
@@ -1686,6 +1710,19 @@ def save_to_file(file_name, model, state_dict, dtype, metadata):
 
 CLAMP_QUANTILE = 0.99
 
+def validate_tensor_is_finite(tensor, label):
+    if not torch.isfinite(tensor).all():
+        raise RuntimeError(f"Non-finite values detected while merging LoRA: {label}")
+
+def validate_merged_checkpoint_state_dict(state_dict):
+    checked = 0
+    for key, value in state_dict.items():
+        if not isinstance(value, torch.Tensor) or not torch.is_floating_point(value):
+            continue
+        validate_tensor_is_finite(value, key)
+        checked += 1
+    print(f"SuperMerger: validated {checked} floating tensors after LoRA merge")
+
 def str_to_dtype(p):
   if p == 'float':
     return torch.float
@@ -1761,6 +1798,7 @@ def dimgetter(filename, device = "cpu"):
     dim = None
     ltype = None
     isanima = any(is_anima_lora_key(key) for key in lora_sd.keys())
+    islycoris = is_lycoris_state_dict(lora_sd)
 
     if isanima:
         sdx = "Anima"
@@ -1771,7 +1809,9 @@ def dimgetter(filename, device = "cpu"):
           lora_sd, _, _ = load_state_dict(filename, torch.float, device)
       _, _, dim, _ = dimalpha(lora_sd)
 
-    if isanima:
+    if isanima and islycoris:
+        dim, ltype = "LyCORIS", "LyCORIS"
+    elif isanima:
         if any(type(v) is dict for v in lora_sd.values()):
             lora_sd, _, _ = load_state_dict(filename, torch.float, device)
         _, _, dim, _ = dimalpha(lora_sd)
@@ -1799,7 +1839,7 @@ def dimgetter(filename, device = "cpu"):
                 dim = value.size()[0]
             elif type(value) == dict:
                 dim = value.get("shape",[0,0])[0]
-        if "hada_" in key:
+        if any(token in key for token in ("hada_", "lokr_", "oft_", "dora_scale", "w_norm", "b_norm")):
             dim,ltype = "LyCORIS","LyCORIS"
         if alpha is not None and dim is not None:
             break

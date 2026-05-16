@@ -185,13 +185,22 @@ class NetworkModule:
         updown = updown.to(orig_weight.device)
 
         merged_scale1 = updown + orig_weight
-        merged_scale1_norm = (
-            merged_scale1.transpose(0, 1)
-            .reshape(merged_scale1.shape[1], -1)
-            .norm(dim=1, keepdim=True)
-            .reshape(merged_scale1.shape[1], *[1] * self.dora_norm_dims)
-            .transpose(0, 1)
-        )
+        if dora_scale.shape[0] == merged_scale1.shape[0]:
+            merged_scale1_norm = (
+                merged_scale1
+                .reshape(merged_scale1.shape[0], -1)
+                .norm(dim=1, keepdim=True)
+                .reshape(merged_scale1.shape[0], *[1] * self.dora_norm_dims)
+            )
+        else:
+            merged_scale1_norm = (
+                merged_scale1.transpose(0, 1)
+                .reshape(merged_scale1.shape[1], -1)
+                .norm(dim=1, keepdim=True)
+                .reshape(merged_scale1.shape[1], *[1] * self.dora_norm_dims)
+                .transpose(0, 1)
+            )
+        merged_scale1_norm = merged_scale1_norm.clamp_min(torch.finfo(merged_scale1_norm.dtype).eps)
 
         dora_merged = (
             merged_scale1 * (dora_scale / merged_scale1_norm)
