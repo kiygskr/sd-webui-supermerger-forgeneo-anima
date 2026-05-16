@@ -95,6 +95,63 @@ def default_ratio_length_for_lora(filename):
         pass
     return 26
 
+def split_lora_entries(text):
+    entries = []
+    current = []
+    angle_depth = 0
+    for char in text:
+        if char == "<":
+            angle_depth += 1
+        elif char == ">" and angle_depth > 0:
+            angle_depth -= 1
+        if char == "," and angle_depth == 0:
+            entry = "".join(current).strip()
+            if entry:
+                entries.append(entry)
+            current = []
+        else:
+            current.append(char)
+    entry = "".join(current).strip()
+    if entry:
+        entries.append(entry)
+    return entries
+
+def parse_lora_prompt_entry(entry):
+    entry = entry.strip()
+    if not (entry.startswith("<") and entry.endswith(">")):
+        return None
+
+    content = entry[1:-1].strip()
+    parts = [part.strip() for part in content.split(":")]
+    if len(parts) < 2 or parts[0].lower() not in ("lora", "lyco"):
+        return None
+
+    name = parts[1]
+    multiplier = parts[2] if len(parts) > 2 and parts[2] else "1"
+    lbw_value = None
+    for part in parts[3:]:
+        if part.startswith("lbw="):
+            lbw_value = part.replace("lbw=", "", 1)
+            break
+    return name, multiplier, lbw_value
+
+def parse_lora_merge_entries(text):
+    parsed = []
+    for entry in split_lora_entries(text):
+        prompt_entry = parse_lora_prompt_entry(entry)
+        if prompt_entry is not None:
+            name, multiplier, lbw_value = prompt_entry
+            parsed.append([name, multiplier, lbw_value] if lbw_value else [name, multiplier])
+            continue
+
+        if ":" in entry:
+            parsed.append([part.strip() for part in entry.split(":")])
+        elif parsed:
+            parsed[-1].append(entry.strip())
+        elif entry:
+            parsed.append([entry.strip(), "1"])
+    return parsed
+
 
 def ui_weight_blocks(weight_type):
     if weight_type == "XL":
@@ -773,19 +830,9 @@ def lmerge(loranames,loraratioss,settings,filename,dim,save_precision,calc_preci
 
             loras_on_disk = [lora.available_loras.get(name, None) for name in loranames]
 
-        lnames = loranames.split(",")
-
         #LoRAname1:ratio1:Blocks1,LoRAname2:ratio2:Blocks2,.
         #LoRAname1:ratio1:1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,LoRAname2:ratio2:Blocks2,.
-
-        temp = []
-        for n in lnames:
-            if ":" in n:
-                temp.append(n.split(":"))
-            else:
-                temp[-1].append(n)
-
-        lnames = temp
+        lnames = parse_lora_merge_entries(loranames)
 
         loraratios=loraratioss.splitlines()
         ldict ={}
@@ -800,11 +847,19 @@ def lmerge(loranames,loraratioss,settings,filename,dim,save_precision,calc_preci
         for i,n in enumerate(lnames):
             c_lora = lora.available_loras.get(n[0], None)
             ratio_length = default_ratio_length_for_lora(c_lora.filename) if c_lora is not None else 26
+            if c_lora is None:
+                return f"ERROR: LoRA not found: {n[0]}"
             if len(n) ==2:
                 ratio = default_ratio_for_length(ratio_length, n[1])
             elif len(n) ==3:
-                if n[2].strip() in ldict:
-                    ratio = [float(r)*float(n[1]) for r in ldict[n[2]].split(",")]
+                block_spec = n[2].strip()
+                if block_spec.startswith("lbw="):
+                    block_spec = block_spec.replace("lbw=", "", 1)
+                if block_spec in ldict:
+                    ratio = [float(r)*float(n[1]) for r in ldict[block_spec].split(",")]
+                    ratio = to26(ratio)
+                elif "," in block_spec and block_spec.count(",") + 1 in BLOCKNUMS:
+                    ratio = [float(r)*float(n[1]) for r in block_spec.split(",")]
                     ratio = to26(ratio)
                 else:
                     ratio = default_ratio_for_length(ratio_length, n[1])
@@ -1147,14 +1202,7 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
     print("Plus LoRA start")
     add = ""
 
-    temp = []
-    for n in lnames.split(","):
-        if ":" in n:
-            temp.append(n.split(":"))
-        else:
-            temp[-1].append(n)
-    
-    lnames = temp
+    lnames = parse_lora_merge_entries(lnames)
 
     loraratios=loraratios.splitlines()
     ldict ={}
@@ -1167,12 +1215,20 @@ def pluslora(lnames,loraratios,settings,output,model,save_precision,calc_precisi
 
     for n in lnames:
         c_lora = lora.available_loras.get(n[0], lora.available_lora_aliases.get(n[0],None))
+        if c_lora is None:
+            return f"ERROR: LoRA not found: {n[0]}"
         ratio_length = default_ratio_length_for_lora(c_lora.filename) if c_lora is not None else 26
         if len(n) ==2:
             ratio = default_ratio_for_length(ratio_length, n[1])
         elif len(n) ==3:
-            if n[2].strip() in ldict:
-                ratio = [float(r)*float(n[1]) for r in ldict[n[2]].split(",")]
+            block_spec = n[2].strip()
+            if block_spec.startswith("lbw="):
+                block_spec = block_spec.replace("lbw=", "", 1)
+            if block_spec in ldict:
+                ratio = [float(r)*float(n[1]) for r in ldict[block_spec].split(",")]
+                ratio = to26(ratio)
+            elif "," in block_spec and block_spec.count(",") + 1 in BLOCKNUMS:
+                ratio = [float(r)*float(n[1]) for r in block_spec.split(",")]
                 ratio = to26(ratio)
             else:
                 ratio = default_ratio_for_length(ratio_length, n[1])
